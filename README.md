@@ -7,8 +7,7 @@ Read and edit notes with full control over styles, checklists, folders, and stru
 ## Quickstart
 
 ```bash
-brew install johnmatthewtennant/tap/notekit-cli
-mkdir -p ~/.agents/skills/apple-notes && curl -sL https://raw.githubusercontent.com/johnmatthewtennant/notekit-cli/master/.agents/skills/apple-notes/SKILL.md -o ~/.agents/skills/apple-notes/SKILL.md && ln -sfn ~/.agents/skills/apple-notes ~/.claude/skills/apple-notes
+curl -sL https://raw.githubusercontent.com/johnmatthewtennant/notekit-cli/master/install.sh | bash
 ```
 
 Then in Claude Code:

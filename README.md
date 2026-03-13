@@ -4,16 +4,23 @@ A command-line interface for Apple Notes, built on the private NotesShared frame
 
 Read and edit notes with full control over styles, checklists, folders, and structure — capabilities not available through AppleScript or any public API.
 
+## Quickstart
+
+```bash
+brew install johnmatthewtennant/tap/notekit-cli
+mkdir -p ~/.agents/skills/apple-notes && curl -sL https://raw.githubusercontent.com/johnmatthewtennant/notekit-cli/master/.agents/skills/apple-notes/SKILL.md -o ~/.agents/skills/apple-notes/SKILL.md && ln -sfn ~/.agents/skills/apple-notes ~/.claude/skills/apple-notes
+```
+
+Then in Claude Code:
+
+```
+/apple-notes
+```
+
 ## Requirements
 
 - macOS (tested on macOS 15+)
 - Xcode Command Line Tools (`xcode-select --install`)
-
-## Install
-
-```bash
-brew install johnmatthewtennant/tap/notekit-cli
-```
 
 ### Build from source
 
@@ -65,14 +72,6 @@ notekit delete-line <title> <search-text> [--folder <name>]
 A note is a flat string with attribute ranges at character offsets. Each range has a style (0=title, 1=heading, 3=body, 103=checklist), indent level, and optional properties (todo-done, link, strikethrough). Use `read-attrs` to see the raw attribute stream.
 
 Primitives give you full control — you can do anything with `read-attrs`, `set-attr`, `insert`, and `delete-range`.
-
-## Claude Code Skill
-
-Install the skill so Claude Code can use notekit automatically:
-
-```bash
-mkdir -p ~/.agents/skills/apple-notes && curl -sL https://raw.githubusercontent.com/johnmatthewtennant/notekit-cli/master/.agents/skills/apple-notes/SKILL.md -o ~/.agents/skills/apple-notes/SKILL.md && ln -sfn ~/.agents/skills/apple-notes ~/.claude/skills/apple-notes
-```
 
 ## Private API Notice
 

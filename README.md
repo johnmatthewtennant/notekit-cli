@@ -66,6 +66,14 @@ A note is a flat string with attribute ranges at character offsets. Each range h
 
 Primitives give you full control — you can do anything with `read-attrs`, `set-attr`, `insert`, and `delete-range`.
 
+## Claude Code Skill
+
+Install the skill so Claude Code can use notekit automatically:
+
+```bash
+mkdir -p ~/.claude/skills/apple-notes && curl -sL https://raw.githubusercontent.com/johnmatthewtennant/notekit-cli/master/.agents/skills/apple-notes/SKILL.md -o ~/.claude/skills/apple-notes/SKILL.md
+```
+
 ## Private API Notice
 
 This tool uses Apple's private `NotesShared.framework`. It is not endorsed by Apple and may break with any macOS update. Use at your own risk.

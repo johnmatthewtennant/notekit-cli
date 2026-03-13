@@ -71,7 +71,7 @@ Primitives give you full control — you can do anything with `read-attrs`, `set
 Install the skill so Claude Code can use notekit automatically:
 
 ```bash
-mkdir -p ~/.claude/skills/apple-notes && curl -sL https://raw.githubusercontent.com/johnmatthewtennant/notekit-cli/master/.agents/skills/apple-notes/SKILL.md -o ~/.claude/skills/apple-notes/SKILL.md
+mkdir -p ~/.agents/skills/apple-notes && curl -sL https://raw.githubusercontent.com/johnmatthewtennant/notekit-cli/master/.agents/skills/apple-notes/SKILL.md -o ~/.agents/skills/apple-notes/SKILL.md && ln -sfn ~/.agents/skills/apple-notes ~/.claude/skills/apple-notes
 ```
 
 ## Private API Notice

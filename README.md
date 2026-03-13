@@ -2,7 +2,7 @@
 
 A command-line interface for Apple Notes, built on the private NotesShared framework.
 
-Read and write notes as Markdown, with support for headings, checklists, and folder filtering.
+Read and edit notes with full control over styles, checklists, folders, and structure — capabilities not available through AppleScript or any public API.
 
 ## Requirements
 
@@ -23,33 +23,48 @@ cd notekit-cli
 make
 ```
 
-This produces a `notekit` binary in the current directory. Move it to your PATH if desired.
-
 ## Usage
 
 ```
-notekit read <title> [--folder <folder>]
-notekit write <title> [--folder <folder>]    # reads markdown from stdin
-notekit list [--folder <folder>]
-notekit test
+notekit help
 ```
 
-### Examples
+### Primitives
 
-List all notes:
-```bash
-notekit list
+```
+notekit folders
+notekit list [--folder <name>] [--limit <n>]
+notekit get <title> [--folder <name>]
+notekit read <title> [--folder <name>]
+notekit read-attrs <title> [--folder <name>]
+notekit create-empty --folder <name>
+notekit delete <title> [--folder <name>]
+notekit append <title> <text> [--folder <name>]
+notekit insert <title> <text> --position <n> [--folder <name>]
+notekit delete-range <title> --start <n> --length <n> [--folder <name>]
+notekit set-attr <title> --offset <n> --length <n> [--style <n>] [--indent <n>] [--todo-done true|false] [--folder <name>]
+notekit move <title> --folder <from> --to <to-folder>
+notekit create-folder <name>
+notekit delete-folder <name>
+notekit search <query> [--folder <name>]
+notekit pin <title> [--folder <name>]
+notekit unpin <title> [--folder <name>]
 ```
 
-Read a note as Markdown:
-```bash
-notekit read "My Note"
+### Convenience commands
+
+```
+notekit replace <title> --search <text> --replacement <text> [--folder <name>]
+notekit read-structured <title> [--folder <name>]
+notekit duplicate <title> [--folder <name>] [--title <new-title>]
+notekit delete-line <title> <search-text> [--folder <name>]
 ```
 
-Update a note from Markdown:
-```bash
-echo "# My Note\nNew content" | notekit write "My Note"
-```
+### Data model
+
+A note is a flat string with attribute ranges at character offsets. Each range has a style (0=title, 1=heading, 3=body, 103=checklist), indent level, and optional properties (todo-done, link, strikethrough). Use `read-attrs` to see the raw attribute stream.
+
+Primitives give you full control — you can do anything with `read-attrs`, `set-attr`, `insert`, and `delete-range`.
 
 ## Private API Notice
 

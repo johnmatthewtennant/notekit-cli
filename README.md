@@ -4,22 +4,21 @@ A command-line interface for Apple Notes, built on the private NotesShared frame
 
 Read and edit notes with full control over styles, checklists, folders, and structure — capabilities not available through AppleScript or any public API.
 
-## Quickstart
+## Install
 
 ```bash
-curl -sL https://raw.githubusercontent.com/johnmatthewtennant/notekit-cli/master/install.sh | bash
+brew install johnmatthewtennant/tap/notekit-cli
 ```
 
-Then in Claude Code:
+With Claude Code skill:
 
-```
-/apple-notes
+```bash
+brew install --with-skill johnmatthewtennant/tap/notekit-cli
 ```
 
 ## Requirements
 
 - macOS (tested on macOS 15+)
-- Xcode Command Line Tools (`xcode-select --install`)
 
 ### Build from source
 

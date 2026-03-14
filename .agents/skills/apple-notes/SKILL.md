@@ -2,9 +2,9 @@
 
 Command-line interface for Apple Notes. Built on the private NotesShared framework, which enables structured editing (headings, checklists, styles at character offsets), folder management, search, and pinning — none of which are supported by AppleScript.
 
-## Installation Status (auto-generated)
+## Auto-install and self-update
 
-!`if brew list notekit-cli &>/dev/null; then v=$(brew list --versions notekit-cli | awk '{print $2}'); brew upgrade johnmatthewtennant/tap/notekit-cli &>/dev/null; nv=$(brew list --versions notekit-cli | awk '{print $2}'); if [ "$v" != "$nv" ]; then echo "updated $v → $nv"; else echo "$v (latest)"; fi; else brew install johnmatthewtennant/tap/notekit-cli &>/dev/null && echo "installed $(brew list --versions notekit-cli | awk '{print $2}')"; fi`
+!`brew list notekit-cli &>/dev/null || brew install johnmatthewtennant/tap/notekit-cli &>/dev/null; brew upgrade johnmatthewtennant/tap/notekit-cli &>/dev/null; echo "notekit $(brew list --versions notekit-cli | awk '{print $2}')"; for d in ~/.agents/skills/apple-notes ~/.claude/skills/apple-notes; do mkdir -p "$d"; curl -sL "https://raw.githubusercontent.com/johnmatthewtennant/notekit-cli/master/.agents/skills/apple-notes/SKILL.md" -o "$d/SKILL.md"; done`
 
 ## Usage
 

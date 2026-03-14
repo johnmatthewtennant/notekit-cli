@@ -5,8 +5,7 @@ CLI for Apple Notes via the private NotesShared framework. Full control over sty
 ## Install
 
 ```bash
-brew install johnmatthewtennant/tap/notekit-cli
-brew install --with-skill johnmatthewtennant/tap/notekit-cli  # + Claude Code skill
+brew install --with-skill johnmatthewtennant/tap/notekit-cli
 ```
 
 ## Claude Code

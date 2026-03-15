@@ -1292,19 +1292,6 @@ static void usage(void) {
     fprintf(stderr, "  notes-cli-v2 delete-line <title> <search-text> [--folder <name>]\\n");
     fprintf(stderr, "\\n  Testing:\\n");
     fprintf(stderr, "  notes-cli-v2 test\\n");
-    fprintf(stderr, "\\n  Troubleshooting:\\n");
-    fprintf(stderr, "  If you get Core Data or permission errors:\\n");
-    fprintf(stderr, "\\n");
-    fprintf(stderr, "  1. First time? Trigger the permission prompt:\\n");
-    fprintf(stderr, "     osascript -e 'tell application \\"Notes\\" to get name of every folder'\\n");
-    fprintf(stderr, "     Grant access when the macOS dialog appears.\\n");
-    fprintf(stderr, "\\n");
-    fprintf(stderr, "  2. Previously denied? Reset and re-prompt:\\n");
-    fprintf(stderr, "     tccutil reset AppleEvents com.apple.Terminal && osascript -e 'tell application \\"Notes\\" to get name of every folder'\\n");
-    fprintf(stderr, "     tccutil reset AppleEvents com.googlecode.iterm2 && osascript -e 'tell application \\"Notes\\" to get name of every folder'\\n");
-    fprintf(stderr, "\\n");
-    fprintf(stderr, "  3. Still not working? Check System Settings > Privacy & Security > Automation\\n");
-    fprintf(stderr, "     and ensure your terminal app has Notes access enabled.\\n");
 }
 '''
 

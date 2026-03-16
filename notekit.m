@@ -184,25 +184,30 @@ static int cmdList(id viewContext, NSString *folderName, NSUInteger limit) {
     return 0;
 }
 
+static int cmdGetNote(id note) {
+    printJSON(noteToDict(note));
+    return 0;
+}
+
 static int cmdGet(id viewContext, NSString *title, NSString *folderName) {
     id note = findNote(viewContext, title, folderName);
     if (!note) errorExit([NSString stringWithFormat:@"Note not found: %@", title]);
-    printJSON(noteToDict(note));
+    return cmdGetNote(note);
+}
+
+static int cmdReadNote(id note) {
+    NSString *body = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("noteAsPlainTextWithoutTitle"));
+    if (body) printf("%s\n", [body UTF8String]);
     return 0;
 }
 
 static int cmdRead(id viewContext, NSString *title, NSString *folderName) {
     id note = findNote(viewContext, title, folderName);
     if (!note) errorExit([NSString stringWithFormat:@"Note not found: %@", title]);
-
-    NSString *body = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("noteAsPlainTextWithoutTitle"));
-    if (body) printf("%s\n", [body UTF8String]);
-    return 0;
+    return cmdReadNote(note);
 }
 
-static int cmdReadAttrs(id viewContext, NSString *title, NSString *folderName) {
-    id note = findNote(viewContext, title, folderName);
-    if (!note) errorExit([NSString stringWithFormat:@"Note not found: %@", title]);
+static int cmdReadAttrsNote(id note) {
 
     id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
     id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
@@ -258,6 +263,12 @@ static int cmdReadAttrs(id viewContext, NSString *title, NSString *folderName) {
 
     printJSON(ranges);
     return 0;
+}
+
+static int cmdReadAttrs(id viewContext, NSString *title, NSString *folderName) {
+    id note = findNote(viewContext, title, folderName);
+    if (!note) errorExit([NSString stringWithFormat:@"Note not found: %@", title]);
+    return cmdReadAttrsNote(note);
 }
 
 static int cmdCreateFolder(id viewContext, NSString *name) {
@@ -494,10 +505,7 @@ static int cmdPin(id viewContext, NSString *identifier, BOOL pin) {
 
 // NOTE: read-structured is a composed view, not a 1:1 API mapping.
 // Consider moving to a separate wrapper CLI in the future.
-static int cmdReadStructured(id viewContext, NSString *title, NSString *folderName) {
-    id note = findNote(viewContext, title, folderName);
-    if (!note) errorExit([NSString stringWithFormat:@"Note not found: %@", title]);
-
+static int cmdReadStructuredNote(id note) {
     id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
     id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
     NSAttributedString *attrStr = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attributedString"));
@@ -561,6 +569,12 @@ static int cmdReadStructured(id viewContext, NSString *title, NSString *folderNa
     }
     printJSON(paragraphs);
     return 0;
+}
+
+static int cmdReadStructured(id viewContext, NSString *title, NSString *folderName) {
+    id note = findNote(viewContext, title, folderName);
+    if (!note) errorExit([NSString stringWithFormat:@"Note not found: %@", title]);
+    return cmdReadStructuredNote(note);
 }
 
 static int cmdCreateEmpty(id viewContext, NSString *folderName) {
@@ -1269,9 +1283,9 @@ static void usage(void) {
     fprintf(stderr, "Primitives:\n");
     fprintf(stderr, "  notes-cli-v2 folders\n");
     fprintf(stderr, "  notes-cli-v2 list [--folder <name>] [--limit <n>]\n");
-    fprintf(stderr, "  notes-cli-v2 get (<title> | --title <title>) [--folder <name>]\n");
-    fprintf(stderr, "  notes-cli-v2 read (<title> | --title <title>) [--folder <name>]\n");
-    fprintf(stderr, "  notes-cli-v2 read-attrs (<title> | --title <title>) [--folder <name>]\n");
+    fprintf(stderr, "  notes-cli-v2 get (<title> | --title <title> | --id <id>) [--folder <name>]\n");
+    fprintf(stderr, "  notes-cli-v2 read (<title> | --title <title> | --id <id>) [--folder <name>]\n");
+    fprintf(stderr, "  notes-cli-v2 read-attrs (<title> | --title <title> | --id <id>) [--folder <name>]\n");
     fprintf(stderr, "  notes-cli-v2 create-empty --folder <name>\n");
     fprintf(stderr, "  notes-cli-v2 delete --id <id>\n");
     fprintf(stderr, "  notes-cli-v2 append --id <id> (<text> | --text <text>)\n");
@@ -1286,7 +1300,7 @@ static void usage(void) {
     fprintf(stderr, "  notes-cli-v2 unpin --id <id>\n");
     fprintf(stderr, "\n  Convenience (composed from primitives):\n");
     fprintf(stderr, "  notes-cli-v2 replace --id <id> --search <text> --replacement <text>\n");
-    fprintf(stderr, "  notes-cli-v2 read-structured (<title> | --title <title>) [--folder <name>]\n");
+    fprintf(stderr, "  notes-cli-v2 read-structured (<title> | --title <title> | --id <id>) [--folder <name>]\n");
     fprintf(stderr, "  notes-cli-v2 duplicate --id <id> [--new-title <new-title>]\n");
     fprintf(stderr, "  notes-cli-v2 delete-line --id <id> (<search-text> | --search-text <search-text>)\n");
     fprintf(stderr, "\n  Testing:\n");
@@ -1340,23 +1354,47 @@ int main(int argc, const char *argv[]) {
             return cmdList(viewContext, folderName, limit);
 
         } else if ([command isEqualToString:@"get"]) {
+            NSString *noteID = opts[@"id"];
             NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
-            if (!title) { fprintf(stderr, "Error: title required\n"); usage(); return 1; }
+            if (!noteID && !title) { fprintf(stderr, "Error: title or --id required\n"); usage(); return 1; }
+            if (noteID) {
+                id note = findNoteByID(viewContext, noteID);
+                if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", noteID]);
+                return cmdGetNote(note);
+            }
             return cmdGet(viewContext, title, folderName);
 
         } else if ([command isEqualToString:@"read"]) {
+            NSString *noteID = opts[@"id"];
             NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
-            if (!title) { fprintf(stderr, "Error: title required\n"); usage(); return 1; }
+            if (!noteID && !title) { fprintf(stderr, "Error: title or --id required\n"); usage(); return 1; }
+            if (noteID) {
+                id note = findNoteByID(viewContext, noteID);
+                if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", noteID]);
+                return cmdReadNote(note);
+            }
             return cmdRead(viewContext, title, folderName);
 
         } else if ([command isEqualToString:@"read-attrs"]) {
+            NSString *noteID = opts[@"id"];
             NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
-            if (!title) { fprintf(stderr, "Error: title required\n"); usage(); return 1; }
+            if (!noteID && !title) { fprintf(stderr, "Error: title or --id required\n"); usage(); return 1; }
+            if (noteID) {
+                id note = findNoteByID(viewContext, noteID);
+                if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", noteID]);
+                return cmdReadAttrsNote(note);
+            }
             return cmdReadAttrs(viewContext, title, folderName);
 
         } else if ([command isEqualToString:@"read-structured"]) {
+            NSString *noteID = opts[@"id"];
             NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
-            if (!title) { fprintf(stderr, "Error: title required\n"); usage(); return 1; }
+            if (!noteID && !title) { fprintf(stderr, "Error: title or --id required\n"); usage(); return 1; }
+            if (noteID) {
+                id note = findNoteByID(viewContext, noteID);
+                if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", noteID]);
+                return cmdReadStructuredNote(note);
+            }
             return cmdReadStructured(viewContext, title, folderName);
 
         } else if ([command isEqualToString:@"set-attr"]) {

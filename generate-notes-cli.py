@@ -1270,26 +1270,26 @@ static void usage(void) {
     fprintf(stderr, "Primitives:\\n");
     fprintf(stderr, "  notes-cli-v2 folders\\n");
     fprintf(stderr, "  notes-cli-v2 list [--folder <name>] [--limit <n>]\\n");
-    fprintf(stderr, "  notes-cli-v2 get <title> [--folder <name>]\\n");
-    fprintf(stderr, "  notes-cli-v2 read <title> [--folder <name>]\\n");
-    fprintf(stderr, "  notes-cli-v2 read-attrs <title> [--folder <name>]\\n");
+    fprintf(stderr, "  notes-cli-v2 get (<title> | --title <title>) [--folder <name>]\\n");
+    fprintf(stderr, "  notes-cli-v2 read (<title> | --title <title>) [--folder <name>]\\n");
+    fprintf(stderr, "  notes-cli-v2 read-attrs (<title> | --title <title>) [--folder <name>]\\n");
     fprintf(stderr, "  notes-cli-v2 create-empty --folder <name>\\n");
-    fprintf(stderr, "  notes-cli-v2 delete <title> [--folder <name>]\\n");
-    fprintf(stderr, "  notes-cli-v2 append <title> <text> [--folder <name>]\\n");
-    fprintf(stderr, "  notes-cli-v2 insert <title> <text> --position <n> [--folder <name>]\\n");
-    fprintf(stderr, "  notes-cli-v2 delete-range <title> --start <n> --length <n> [--folder <name>]\\n");
-    fprintf(stderr, "  notes-cli-v2 set-attr <title> --offset <n> --length <n> [--style <n>] [--indent <n>] [--todo-done true|false] [--folder <name>]\\n");
-    fprintf(stderr, "  notes-cli-v2 move <title> --folder <from> --to <to-folder>\\n");
-    fprintf(stderr, "  notes-cli-v2 create-folder <name>\\n");
-    fprintf(stderr, "  notes-cli-v2 delete-folder <name>\\n");
-    fprintf(stderr, "  notes-cli-v2 search <query> [--folder <name>]\\n");
-    fprintf(stderr, "  notes-cli-v2 pin <title> [--folder <name>]\\n");
-    fprintf(stderr, "  notes-cli-v2 unpin <title> [--folder <name>]\\n");
+    fprintf(stderr, "  notes-cli-v2 delete (<title> | --title <title>) [--folder <name>]\\n");
+    fprintf(stderr, "  notes-cli-v2 append (<title> | --title <title>) (<text> | --text <text>) [--folder <name>]\\n");
+    fprintf(stderr, "  notes-cli-v2 insert (<title> | --title <title>) (<text> | --text <text>) --position <n> [--folder <name>]\\n");
+    fprintf(stderr, "  notes-cli-v2 delete-range (<title> | --title <title>) --start <n> --length <n> [--folder <name>]\\n");
+    fprintf(stderr, "  notes-cli-v2 set-attr (<title> | --title <title>) --offset <n> --length <n> [--style <n>] [--indent <n>] [--todo-done true|false] [--folder <name>]\\n");
+    fprintf(stderr, "  notes-cli-v2 move (<title> | --title <title>) --folder <from> --to <to-folder>\\n");
+    fprintf(stderr, "  notes-cli-v2 create-folder (<name> | --name <name>)\\n");
+    fprintf(stderr, "  notes-cli-v2 delete-folder (<name> | --name <name>)\\n");
+    fprintf(stderr, "  notes-cli-v2 search (<query> | --query <query>) [--folder <name>]\\n");
+    fprintf(stderr, "  notes-cli-v2 pin (<title> | --title <title>) [--folder <name>]\\n");
+    fprintf(stderr, "  notes-cli-v2 unpin (<title> | --title <title>) [--folder <name>]\\n");
     fprintf(stderr, "\\n  Convenience (composed from primitives):\\n");
-    fprintf(stderr, "  notes-cli-v2 replace <title> --search <text> --replacement <text> [--folder <name>]\\n");
-    fprintf(stderr, "  notes-cli-v2 read-structured <title> [--folder <name>]\\n");
-    fprintf(stderr, "  notes-cli-v2 duplicate <title> [--folder <name>] [--title <new-title>]\\n");
-    fprintf(stderr, "  notes-cli-v2 delete-line <title> <search-text> [--folder <name>]\\n");
+    fprintf(stderr, "  notes-cli-v2 replace (<title> | --title <title>) --search <text> --replacement <text> [--folder <name>]\\n");
+    fprintf(stderr, "  notes-cli-v2 read-structured (<title> | --title <title>) [--folder <name>]\\n");
+    fprintf(stderr, "  notes-cli-v2 duplicate (<title> | --title <title>) [--folder <name>] [--new-title <new-title>]\\n");
+    fprintf(stderr, "  notes-cli-v2 delete-line (<title> | --title <title>) (<search-text> | --search-text <search-text>) [--folder <name>]\\n");
     fprintf(stderr, "\\n  Testing:\\n");
     fprintf(stderr, "  notes-cli-v2 test\\n");
 }
@@ -1322,6 +1322,15 @@ int main(int argc, const char *argv[]) {
             }
         }
 
+        // Resolve keyword args: --title, --name, --text, --query, --search-text, --new-title
+        // Keyword args take priority over positional args
+        NSString *kwTitle = opts[@"title"];
+        NSString *kwName = opts[@"name"];
+        NSString *kwText = opts[@"text"];
+        NSString *kwQuery = opts[@"query"];
+        NSString *kwSearchText = opts[@"search-text"];
+        NSString *kwNewTitle = opts[@"new-title"];
+
         NSString *folderName = opts[@"folder"];
         id viewContext = getViewContext();
 
@@ -1333,86 +1342,107 @@ int main(int argc, const char *argv[]) {
             return cmdList(viewContext, folderName, limit);
 
         } else if ([command isEqualToString:@"get"]) {
-            if (positional.count < 1) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
-            return cmdGet(viewContext, positional[0], folderName);
+            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
+            if (!title) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
+            return cmdGet(viewContext, title, folderName);
 
         } else if ([command isEqualToString:@"read"]) {
-            if (positional.count < 1) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
-            return cmdRead(viewContext, positional[0], folderName);
+            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
+            if (!title) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
+            return cmdRead(viewContext, title, folderName);
 
         } else if ([command isEqualToString:@"read-attrs"]) {
-            if (positional.count < 1) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
-            return cmdReadAttrs(viewContext, positional[0], folderName);
+            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
+            if (!title) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
+            return cmdReadAttrs(viewContext, title, folderName);
 
         } else if ([command isEqualToString:@"read-structured"]) {
-            if (positional.count < 1) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
-            return cmdReadStructured(viewContext, positional[0], folderName);
+            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
+            if (!title) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
+            return cmdReadStructured(viewContext, title, folderName);
 
         } else if ([command isEqualToString:@"set-attr"]) {
-            if (positional.count < 1) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
+            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
+            if (!title) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
             if (!opts[@"offset"] || !opts[@"length"]) { fprintf(stderr, "Error: --offset and --length required\\n"); usage(); return 1; }
-            return cmdSetAttr(viewContext, positional[0], folderName,
+            return cmdSetAttr(viewContext, title, folderName,
                 [opts[@"offset"] integerValue], [opts[@"length"] integerValue], opts);
 
         } else if ([command isEqualToString:@"move"]) {
-            if (positional.count < 1) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
+            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
+            if (!title) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
             if (!folderName || !opts[@"to"]) { fprintf(stderr, "Error: --folder and --to required\\n"); usage(); return 1; }
-            return cmdMoveNote(viewContext, positional[0], folderName, opts[@"to"]);
+            return cmdMoveNote(viewContext, title, folderName, opts[@"to"]);
 
         } else if ([command isEqualToString:@"search"]) {
-            if (positional.count < 1) { fprintf(stderr, "Error: query required\\n"); usage(); return 1; }
-            return cmdSearch(viewContext, positional[0], folderName);
+            NSString *query = kwQuery ?: (positional.count > 0 ? positional[0] : nil);
+            if (!query) { fprintf(stderr, "Error: query required\\n"); usage(); return 1; }
+            return cmdSearch(viewContext, query, folderName);
 
         } else if ([command isEqualToString:@"pin"]) {
-            if (positional.count < 1) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
-            return cmdPin(viewContext, positional[0], folderName, YES);
+            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
+            if (!title) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
+            return cmdPin(viewContext, title, folderName, YES);
 
         } else if ([command isEqualToString:@"unpin"]) {
-            if (positional.count < 1) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
-            return cmdPin(viewContext, positional[0], folderName, NO);
+            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
+            if (!title) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
+            return cmdPin(viewContext, title, folderName, NO);
 
         } else if ([command isEqualToString:@"duplicate"]) {
-            if (positional.count < 1) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
-            return cmdDuplicate(viewContext, positional[0], folderName, opts[@"title"]);
+            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
+            if (!title) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
+            return cmdDuplicate(viewContext, title, folderName, kwNewTitle);
 
         } else if ([command isEqualToString:@"create-folder"]) {
-            if (positional.count < 1) { fprintf(stderr, "Error: folder name required\\n"); usage(); return 1; }
-            return cmdCreateFolder(viewContext, positional[0]);
+            NSString *name = kwName ?: (positional.count > 0 ? positional[0] : nil);
+            if (!name) { fprintf(stderr, "Error: folder name required\\n"); usage(); return 1; }
+            return cmdCreateFolder(viewContext, name);
 
         } else if ([command isEqualToString:@"delete-folder"]) {
-            if (positional.count < 1) { fprintf(stderr, "Error: folder name required\\n"); usage(); return 1; }
-            return cmdDeleteFolder(viewContext, positional[0]);
+            NSString *name = kwName ?: (positional.count > 0 ? positional[0] : nil);
+            if (!name) { fprintf(stderr, "Error: folder name required\\n"); usage(); return 1; }
+            return cmdDeleteFolder(viewContext, name);
 
         } else if ([command isEqualToString:@"create-empty"]) {
             if (!folderName) { fprintf(stderr, "Error: --folder required\\n"); usage(); return 1; }
             return cmdCreateEmpty(viewContext, folderName);
 
         } else if ([command isEqualToString:@"delete"]) {
-            if (positional.count < 1) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
-            return cmdDelete(viewContext, positional[0], folderName);
+            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
+            if (!title) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
+            return cmdDelete(viewContext, title, folderName);
 
         } else if ([command isEqualToString:@"append"]) {
-            if (positional.count < 2) { fprintf(stderr, "Error: title and text required\\n"); usage(); return 1; }
-            return cmdAppend(viewContext, positional[0], folderName, positional[1]);
+            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
+            NSString *text = kwText ?: (positional.count > 1 ? positional[1] : nil);
+            if (!title || !text) { fprintf(stderr, "Error: title and text required\\n"); usage(); return 1; }
+            return cmdAppend(viewContext, title, folderName, text);
 
         } else if ([command isEqualToString:@"insert"]) {
-            if (positional.count < 2) { fprintf(stderr, "Error: title and text required\\n"); usage(); return 1; }
+            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
+            NSString *text = kwText ?: (positional.count > 1 ? positional[1] : nil);
+            if (!title || !text) { fprintf(stderr, "Error: title and text required\\n"); usage(); return 1; }
             if (!opts[@"position"]) { fprintf(stderr, "Error: --position required\\n"); usage(); return 1; }
-            return cmdInsert(viewContext, positional[0], folderName, positional[1], [opts[@"position"] integerValue]);
+            return cmdInsert(viewContext, title, folderName, text, [opts[@"position"] integerValue]);
 
         } else if ([command isEqualToString:@"delete-range"]) {
-            if (positional.count < 1) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
+            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
+            if (!title) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
             if (!opts[@"start"] || !opts[@"length"]) { fprintf(stderr, "Error: --start and --length required\\n"); usage(); return 1; }
-            return cmdDeleteRange(viewContext, positional[0], folderName, [opts[@"start"] integerValue], [opts[@"length"] integerValue]);
+            return cmdDeleteRange(viewContext, title, folderName, [opts[@"start"] integerValue], [opts[@"length"] integerValue]);
 
         } else if ([command isEqualToString:@"replace"]) {
-            if (positional.count < 1) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
+            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
+            if (!title) { fprintf(stderr, "Error: title required\\n"); usage(); return 1; }
             if (!opts[@"search"] || !opts[@"replacement"]) { fprintf(stderr, "Error: --search and --replacement required\\n"); usage(); return 1; }
-            return cmdReplace(viewContext, positional[0], folderName, opts[@"search"], opts[@"replacement"]);
+            return cmdReplace(viewContext, title, folderName, opts[@"search"], opts[@"replacement"]);
 
         } else if ([command isEqualToString:@"delete-line"]) {
-            if (positional.count < 2) { fprintf(stderr, "Error: title and search text required\\n"); usage(); return 1; }
-            return cmdDeleteLine(viewContext, positional[0], folderName, positional[1]);
+            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
+            NSString *searchText = kwSearchText ?: (positional.count > 1 ? positional[1] : nil);
+            if (!title || !searchText) { fprintf(stderr, "Error: title and search text required\\n"); usage(); return 1; }
+            return cmdDeleteLine(viewContext, title, folderName, searchText);
 
         } else if ([command isEqualToString:@"test"]) {
             return cmdTest(viewContext);

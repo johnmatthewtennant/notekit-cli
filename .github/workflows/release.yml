@@ -1,0 +1,162 @@
+name: Auto Release & Homebrew Bump
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to retry (e.g. v0.3.0). Leave empty for normal flow.'
+        required: false
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      !contains(github.event.head_commit.message, '[skip-release]')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag input (workflow_dispatch only)
+        if: github.event.inputs.tag != ''
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          # Validate format
+          if ! echo "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid tag format '$TAG'. Expected vX.Y.Z"
+            exit 1
+          fi
+          # Validate tag exists
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Tag '$TAG' does not exist. Cannot retry a nonexistent release."
+            exit 1
+          fi
+
+      - name: Check if already tagged
+        id: check
+        run: |
+          EXISTING=$(git tag --points-at HEAD 'v*' | head -1)
+          if [ -n "$EXISTING" ]; then
+            echo "has_tag=true" >> $GITHUB_OUTPUT
+            echo "tag=$EXISTING" >> $GITHUB_OUTPUT
+          else
+            echo "has_tag=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get next version
+        if: steps.check.outputs.has_tag != 'true' && github.event.inputs.tag == ''
+        id: version
+        run: |
+          LATEST=$(git tag -l 'v*' | sort -V | tail -1 | sed 's/v//')
+          if [ -z "$LATEST" ]; then
+            NEXT="0.1.0"
+          else
+            MAJOR=$(echo $LATEST | cut -d. -f1)
+            MINOR=$(echo $LATEST | cut -d. -f2)
+            PATCH=$(echo $LATEST | cut -d. -f3)
+            NEXT="$MAJOR.$MINOR.$((PATCH + 1))"
+          fi
+          echo "version=$NEXT" >> $GITHUB_OUTPUT
+          echo "tag=v$NEXT" >> $GITHUB_OUTPUT
+
+      - name: Resolve tag
+        id: resolve
+        run: |
+          # Priority: workflow_dispatch input > existing tag on HEAD > newly computed tag
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          elif [ "${{ steps.check.outputs.has_tag }}" = "true" ]; then
+            echo "tag=${{ steps.check.outputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ steps.version.outputs.tag }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create tag (if needed)
+        if: steps.check.outputs.has_tag != 'true' && github.event.inputs.tag == ''
+        run: |
+          git tag ${{ steps.resolve.outputs.tag }}
+          git push origin ${{ steps.resolve.outputs.tag }}
+
+      - name: Ensure release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=${{ steps.resolve.outputs.tag }}
+          if gh release view "$TAG" &>/dev/null; then
+            echo "Release $TAG already exists."
+          else
+            echo "Creating release $TAG..."
+            gh release create "$TAG" \
+              --verify-tag \
+              --title "$TAG" \
+              --generate-notes
+          fi
+
+      - name: Update Homebrew formula
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::error::TAP_TOKEN secret is not set. Cannot update Homebrew formula."
+            exit 1
+          fi
+
+          TAG=${{ steps.resolve.outputs.tag }}
+
+          # Wait for tarball to be available
+          TARBALL_OK=false
+          for i in 1 2 3 4 5; do
+            HTTP_CODE=$(curl -sL -o /tmp/release.tar.gz -w '%{http_code}' \
+              "https://github.com/johnmatthewtennant/notekit-cli/archive/refs/tags/${TAG}.tar.gz")
+            if [ "$HTTP_CODE" = "200" ]; then
+              TARBALL_OK=true
+              break
+            fi
+            echo "Tarball not ready (HTTP $HTTP_CODE), retrying in 5s..."
+            sleep 5
+          done
+
+          if [ "$TARBALL_OK" != "true" ]; then
+            echo "::error::Failed to download tarball after 5 attempts."
+            exit 1
+          fi
+
+          SHA=$(shasum -a 256 /tmp/release.tar.gz | cut -d' ' -f1)
+
+          # Clone tap using credential helper (avoid token in URL)
+          git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=${TAP_TOKEN}"; }; f'
+          git clone https://github.com/johnmatthewtennant/homebrew-tap.git /tmp/homebrew-tap
+          cd /tmp/homebrew-tap
+
+          # Tightly-anchored sed replacements
+          sed -i '' 's|^  url "https://github.com/johnmatthewtennant/notekit-cli/archive/.*"|  url "https://github.com/johnmatthewtennant/notekit-cli/archive/refs/tags/'"${TAG}"'.tar.gz"|' Formula/notekit-cli.rb
+          sed -i '' 's|^  sha256 ".*"|  sha256 "'"${SHA}"'"|' Formula/notekit-cli.rb
+
+          # Verify the formula references the correct tag
+          if ! grep -q "${TAG}" Formula/notekit-cli.rb; then
+            echo "::error::Formula does not reference ${TAG} after sed. Aborting."
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/notekit-cli.rb
+
+          # Skip commit if formula is unchanged (idempotent)
+          if git diff --cached --quiet; then
+            echo "Formula already up to date. Nothing to push."
+            exit 0
+          fi
+
+          git commit -m "notekit-cli: bump to ${TAG}"
+          git push

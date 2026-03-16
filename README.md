@@ -20,14 +20,14 @@ curl -sL https://raw.githubusercontent.com/johnmatthewtennant/notekit-cli/master
 ```
 notekit folders
 notekit list [--folder <name>]
-notekit get <title> [--folder <name>]
-notekit read <title> [--folder <name>]
-notekit read-attrs <title> [--folder <name>]
-notekit append <title> <text> [--folder <name>]
-notekit insert <title> <text> --position <n> [--folder <name>]
-notekit delete-range <title> --start <n> --length <n> [--folder <name>]
-notekit set-attr <title> --offset <n> --length <n> [--style <n>] [--indent <n>]
-notekit search <query> [--folder <name>]
+notekit get (<title> | --title <title>) [--folder <name>]
+notekit read (<title> | --title <title>) [--folder <name>]
+notekit read-attrs (<title> | --title <title>) [--folder <name>]
+notekit append (<title> | --title <title>) (<text> | --text <text>) [--folder <name>]
+notekit insert (<title> | --title <title>) (<text> | --text <text>) --position <n> [--folder <name>]
+notekit delete-range (<title> | --title <title>) --start <n> --length <n> [--folder <name>]
+notekit set-attr (<title> | --title <title>) --offset <n> --length <n> [--style <n>] [--indent <n>]
+notekit search (<query> | --query <query>) [--folder <name>]
 notekit help                               # full usage
 ```
 

@@ -4,6 +4,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <CoreData/CoreData.h>
+#include <mach-o/dyld.h>
 
 // --- Framework Loading ---
 
@@ -1266,6 +1267,93 @@ static int cmdTest(id viewContext) {
 }
 
 
+// --- Install Skill ---
+
+static int cmdInstallSkill(BOOL installClaude, BOOL installAgents, BOOL force) {
+    // Get path of currently running binary
+    char execPath[PATH_MAX];
+    uint32_t size = sizeof(execPath);
+    if (_NSGetExecutablePath(execPath, &size) != 0) {
+        fprintf(stderr, "Error: could not determine executable path\n");
+        return 1;
+    }
+
+    // Resolve symlinks to get the real path
+    char realPath[PATH_MAX];
+    if (!realpath(execPath, realPath)) {
+        fprintf(stderr, "Error: could not resolve executable path\n");
+        return 1;
+    }
+
+    NSString *binaryPath = [NSString stringWithUTF8String:realPath];
+    NSString *binDir = [binaryPath stringByDeletingLastPathComponent];
+
+    // Try to find SKILL.md relative to the binary
+    // Homebrew: /opt/homebrew/Cellar/notekit-cli/X.Y.Z/bin/notekit
+    //   skill: /opt/homebrew/Cellar/notekit-cli/X.Y.Z/.agents/skills/apple-notes/SKILL.md
+    // Build dir: ./notekit  ->  ./.agents/skills/apple-notes/SKILL.md
+    NSArray *candidates = @[
+        [[binDir stringByDeletingLastPathComponent] stringByAppendingPathComponent:@".agents/skills/apple-notes/SKILL.md"],
+        [[binDir stringByAppendingPathComponent:@".."] stringByAppendingPathComponent:@".agents/skills/apple-notes/SKILL.md"],
+        [binDir stringByAppendingPathComponent:@".agents/skills/apple-notes/SKILL.md"],
+    ];
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *sourcePath = nil;
+    for (NSString *candidate in candidates) {
+        NSString *resolved = [candidate stringByStandardizingPath];
+        if ([fm fileExistsAtPath:resolved]) {
+            sourcePath = resolved;
+            break;
+        }
+    }
+
+    if (!sourcePath) {
+        fprintf(stderr, "Error: could not find SKILL.md relative to binary at %s\n", realPath);
+        fprintf(stderr, "Searched:\n");
+        for (NSString *candidate in candidates) {
+            fprintf(stderr, "  %s\n", [[candidate stringByStandardizingPath] UTF8String]);
+        }
+        return 1;
+    }
+
+    // Install to selected skill directories
+    NSString *home = NSHomeDirectory();
+    NSMutableArray *targetDirs = [NSMutableArray array];
+    if (installClaude) [targetDirs addObject:[home stringByAppendingPathComponent:@".claude/skills/apple-notes"]];
+    if (installAgents) [targetDirs addObject:[home stringByAppendingPathComponent:@".agents/skills/apple-notes"]];
+
+    NSError *error = nil;
+    int failures = 0;
+    for (NSString *dir in targetDirs) {
+        NSString *path = [dir stringByAppendingPathComponent:@"SKILL.md"];
+        if ([fm fileExistsAtPath:path]) {
+            if (!force) {
+                fprintf(stderr, "Error: %s already exists (use --force to overwrite)\n", [path UTF8String]);
+                failures++;
+                continue;
+            }
+            [fm removeItemAtPath:path error:nil];
+        }
+        if (![fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&error]) {
+            fprintf(stderr, "Error: could not create directory %s: %s\n",
+                [dir UTF8String], [[error localizedDescription] UTF8String]);
+            failures++;
+            continue;
+        }
+        if (![fm createSymbolicLinkAtPath:path withDestinationPath:sourcePath error:&error]) {
+            fprintf(stderr, "Error: could not create symlink: %s\n",
+                [[error localizedDescription] UTF8String]);
+            failures++;
+            continue;
+        }
+        printf("Installed skill: %s -> %s\n", [path UTF8String], [sourcePath UTF8String]);
+    }
+
+    return failures > 0 ? 1 : 0;
+}
+
+
 // --- Usage ---
 
 static void usage(void) {
@@ -1303,6 +1391,8 @@ static void usage(void) {
     fprintf(stderr, "  notes-cli-v2 read-structured (--title <title> | --id <id>) [--folder <name>]\n");
     fprintf(stderr, "  notes-cli-v2 duplicate --id <id> [--new-title <new-title>]\n");
     fprintf(stderr, "  notes-cli-v2 delete-line --id <id> --search-text <search-text>\n");
+    fprintf(stderr, "\n  Skill management:\n");
+    fprintf(stderr, "  notes-cli-v2 install-skill [--claude] [--agents] [--force]\n");
     fprintf(stderr, "\n  Testing:\n");
     fprintf(stderr, "  notes-cli-v2 test\n");
 }
@@ -1326,7 +1416,12 @@ int main(int argc, const char *argv[]) {
             NSString *arg = [NSString stringWithUTF8String:argv[i]];
             if ([arg hasPrefix:@"--"]) {
                 NSString *flag = [arg substringFromIndex:2];
-                if (i + 1 < argc) {
+                if ([flag isEqualToString:@"help"] ||
+                    [flag isEqualToString:@"claude"] ||
+                    [flag isEqualToString:@"agents"] ||
+                    [flag isEqualToString:@"force"]) {
+                    opts[flag] = @"true";
+                } else if (i + 1 < argc) {
                     opts[flag] = [NSString stringWithUTF8String:argv[++i]];
                 }
             } else {
@@ -1349,6 +1444,7 @@ int main(int argc, const char *argv[]) {
         // Reject unexpected positional arguments
         if (positional.count > 0 &&
             ![command isEqualToString:@"folders"] &&
+            ![command isEqualToString:@"install-skill"] &&
             ![command isEqualToString:@"test"]) {
             fprintf(stderr, "Error: unexpected argument '%s'. All arguments must use --flag syntax.\n", [positional[0] UTF8String]);
             usage();
@@ -1481,6 +1577,14 @@ int main(int argc, const char *argv[]) {
             if (!noteID || noteID.length == 0) { fprintf(stderr, "Error: --id required\n"); usage(); return 1; }
             if (!kwSearchText) { fprintf(stderr, "Error: --search-text required\n"); usage(); return 1; }
             return cmdDeleteLine(viewContext, noteID, kwSearchText);
+
+        } else if ([command isEqualToString:@"install-skill"]) {
+            BOOL wantClaude = [opts[@"claude"] isEqualToString:@"true"];
+            BOOL wantAgents = [opts[@"agents"] isEqualToString:@"true"];
+            BOOL force = [opts[@"force"] isEqualToString:@"true"];
+            // Default: install to both
+            if (!wantClaude && !wantAgents) { wantClaude = YES; wantAgents = YES; }
+            return cmdInstallSkill(wantClaude, wantAgents, force);
 
         } else if ([command isEqualToString:@"test"]) {
             return cmdTest(viewContext);

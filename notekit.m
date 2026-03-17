@@ -1500,10 +1500,11 @@ static int cmdTest(id viewContext) {
 
     // --- Note Linking Tests ---
 
+    char rawExePath[PATH_MAX];
     char exePath[PATH_MAX];
-    uint32_t exeSize = sizeof(exePath);
-    _NSGetExecutablePath(exePath, &exeSize);
-    realpath(exePath, exePath);
+    uint32_t exeSize = sizeof(rawExePath);
+    _NSGetExecutablePath(rawExePath, &exeSize);
+    realpath(rawExePath, exePath);
 
     // Test: get-link
     fprintf(stderr, "Test: get-link...\n");
@@ -1555,75 +1556,65 @@ static int cmdTest(id viewContext) {
         } else { fprintf(stderr, "  FAIL (notes not found)\n"); failed++; }
     }
 
-    // Test: read-attrs detects linkType=note and linkedNoteId after add-link
+    // Test: read-attrs JSON output includes linkType=note and linkedNoteId (subprocess)
     fprintf(stderr, "Test: read-attrs linkType/linkedNoteId...\n");
     {
         id noteA = findNote(viewContext, testTitle, testFolderName);
         id noteB = findNote(viewContext, testTitle2, testFolderName);
         if (noteA && noteB) {
+            NSString *aId = noteToDict(noteA)[@"id"];
             NSString *bId = noteToDict(noteB)[@"id"];
-            // noteA already has a note link to noteB from the previous test
-            id doc = ((id (*)(id, SEL))objc_msgSend)(noteA, sel_registerName("document"));
-            id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
-            NSString *fullText = [((id (*)(id, SEL))objc_msgSend)(noteA, sel_registerName("attributedString")) string];
+            NSString *cmd = [NSString stringWithFormat:@"'%s' read-attrs --id '%@' 2>/dev/null", exePath, aId];
+            FILE *fp = popen([cmd UTF8String], "r");
+            NSMutableData *outData = [NSMutableData data];
+            if (fp) {
+                char buf[4096];
+                size_t n;
+                while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) [outData appendBytes:buf length:n];
+                pclose(fp);
+            }
+            NSArray *arr = [NSJSONSerialization JSONObjectWithData:outData options:0 error:nil];
             BOOL foundLinkType = NO;
             BOOL foundLinkedNoteId = NO;
-            NSUInteger li = 0;
-            while (li < fullText.length) {
-                NSRange lr;
-                NSDictionary *la = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
-                    ms, sel_registerName("attributesAtIndex:effectiveRange:"), li, &lr);
-                id link = la[@"NSLink"];
-                if (link) {
-                    Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities");
-                    if (ICAppURLUtilities) {
-                        BOOL isNoteLink = ((BOOL (*)(id, SEL, id))objc_msgSend)(
-                            ICAppURLUtilities, sel_registerName("isShowNoteURL:"), link);
-                        if (isNoteLink) foundLinkType = YES;
-                        NSString *noteId = ((id (*)(id, SEL, id))objc_msgSend)(
-                            ICAppURLUtilities, sel_registerName("noteIdentifierFromNotesAppURL:"), link);
-                        if (!noteId && [link isKindOfClass:[NSURL class]]) {
-                            NSURLComponents *comps = [NSURLComponents componentsWithURL:link resolvingAgainstBaseURL:NO];
-                            for (NSURLQueryItem *item in comps.queryItems) {
-                                if ([item.name isEqualToString:@"identifier"]) { noteId = item.value; break; }
-                            }
-                        }
-                        if (noteId && [noteId isEqualToString:bId]) foundLinkedNoteId = YES;
-                    }
-                }
-                li = lr.location + lr.length;
+            for (NSDictionary *entry in arr) {
+                if ([entry[@"linkType"] isEqualToString:@"note"]) foundLinkType = YES;
+                if ([entry[@"linkedNoteId"] isEqualToString:bId]) foundLinkedNoteId = YES;
             }
             if (foundLinkType && foundLinkedNoteId) { fprintf(stderr, "  PASS\n"); passed++; }
             else { fprintf(stderr, "  FAIL (linkType=%d linkedNoteId=%d)\n", foundLinkType, foundLinkedNoteId); failed++; }
         } else { fprintf(stderr, "  FAIL (notes not found)\n"); failed++; }
     }
 
-    // Test: read-structured includes links array for paragraph with note link
+    // Test: read-structured JSON output includes links array with note link (subprocess)
     fprintf(stderr, "Test: read-structured links array...\n");
     {
         id noteA = findNote(viewContext, testTitle, testFolderName);
-        if (noteA) {
-            // noteA has a note link from the add-link append test
-            // Call cmdReadStructuredNote and verify its output contains links
-            // We can't easily capture stdout, so verify the data model directly
-            id doc = ((id (*)(id, SEL))objc_msgSend)(noteA, sel_registerName("document"));
-            id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
-            NSAttributedString *attrStr = ((id (*)(id, SEL))objc_msgSend)(noteA, sel_registerName("attributedString"));
-            NSString *fullText = [attrStr string];
-            BOOL foundLink = NO;
-            NSUInteger li = 0;
-            while (li < fullText.length) {
-                NSRange lr;
-                NSDictionary *la = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
-                    ms, sel_registerName("attributesAtIndex:effectiveRange:"), li, &lr);
-                if (la[@"NSLink"]) { foundLink = YES; break; }
-                li = lr.location + lr.length;
+        id noteB = findNote(viewContext, testTitle2, testFolderName);
+        if (noteA && noteB) {
+            NSString *aId = noteToDict(noteA)[@"id"];
+            NSString *bId = noteToDict(noteB)[@"id"];
+            NSString *cmd = [NSString stringWithFormat:@"'%s' read-structured --id '%@' 2>/dev/null", exePath, aId];
+            FILE *fp = popen([cmd UTF8String], "r");
+            NSMutableData *outData = [NSMutableData data];
+            if (fp) {
+                char buf[4096];
+                size_t n;
+                while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) [outData appendBytes:buf length:n];
+                pclose(fp);
             }
-            // Also verify cmdReadStructuredNote runs without error
-            int ret = cmdReadStructuredNote(noteA);
-            if (foundLink && ret == 0) { fprintf(stderr, "  PASS\n"); passed++; }
-            else { fprintf(stderr, "  FAIL (foundLink=%d ret=%d)\n", foundLink, ret); failed++; }
-        } else { fprintf(stderr, "  FAIL (note not found)\n"); failed++; }
+            NSArray *arr = [NSJSONSerialization JSONObjectWithData:outData options:0 error:nil];
+            BOOL foundNoteLink = NO;
+            for (NSDictionary *para in arr) {
+                NSArray *links = para[@"links"];
+                for (NSDictionary *link in links) {
+                    if ([link[@"type"] isEqualToString:@"note"] && [link[@"linkedNoteId"] isEqualToString:bId]) {
+                        foundNoteLink = YES;
+                    }
+                }
+            }
+            if (foundNoteLink) { fprintf(stderr, "  PASS\n"); passed++; }
+            else { fprintf(stderr, "  FAIL (no note link in structured output)\n"); failed++; }
+        } else { fprintf(stderr, "  FAIL (notes not found)\n"); failed++; }
     }
 
     // Test: add-link at position
@@ -1707,7 +1698,7 @@ static int cmdTest(id viewContext) {
     {
         id noteA = findNote(viewContext, testTitle, testFolderName);
         NSString *aId = noteToDict(noteA)[@"id"];
-        NSString *cmd = [NSString stringWithFormat:@"%s add-link --id %@ --target NONEXISTENT_ID 2>/dev/null", exePath, aId];
+        NSString *cmd = [NSString stringWithFormat:@"'%s' add-link --id '%@' --target NONEXISTENT_ID 2>/dev/null", exePath, aId];
         int ret = system([cmd UTF8String]);
         if (ret != 0) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (should have failed)\n"); failed++; }
@@ -1720,7 +1711,7 @@ static int cmdTest(id viewContext) {
         id noteB = findNote(viewContext, testTitle2, testFolderName);
         NSString *aId = noteToDict(noteA)[@"id"];
         NSString *bId = noteToDict(noteB)[@"id"];
-        NSString *cmd = [NSString stringWithFormat:@"%s add-link --id %@ --target %@ --position 99999 2>/dev/null", exePath, aId, bId];
+        NSString *cmd = [NSString stringWithFormat:@"'%s' add-link --id '%@' --target '%@' --position 99999 2>/dev/null", exePath, aId, bId];
         int ret = system([cmd UTF8String]);
         if (ret != 0) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (should have failed)\n"); failed++; }

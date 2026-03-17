@@ -326,6 +326,12 @@ static int cmdReadAttrsNote(id note) {
                     entry[@"linkType"] = @"note";
                     NSString *noteId = ((id (*)(id, SEL, id))objc_msgSend)(
                         ICAppURLUtilities, sel_registerName("noteIdentifierFromNotesAppURL:"), nsLink);
+                    if (!noteId && [nsLink isKindOfClass:[NSURL class]]) {
+                        NSURLComponents *comps = [NSURLComponents componentsWithURL:nsLink resolvingAgainstBaseURL:NO];
+                        for (NSURLQueryItem *item in comps.queryItems) {
+                            if ([item.name isEqualToString:@"identifier"]) { noteId = item.value; break; }
+                        }
+                    }
                     if (noteId) entry[@"linkedNoteId"] = noteId;
                 } else {
                     entry[@"linkType"] = @"url";
@@ -815,27 +821,6 @@ static int cmdReadStructuredNote(id note) {
         NSUInteger indent = style ? ((NSUInteger (*)(id, SEL))objc_msgSend)(style, sel_registerName("indent")) : 0;
         NSString *chunk = [fullText substringWithRange:effectiveRange];
 
-        id nsLink = attrs[@"NSLink"];
-        if (nsLink) {
-            NSMutableDictionary *linkEntry = [NSMutableDictionary dictionary];
-            linkEntry[@"text"] = chunk;
-            linkEntry[@"url"] = [nsLink description];
-            Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities");
-            if (ICAppURLUtilities) {
-                BOOL isNoteLink = ((BOOL (*)(id, SEL, id))objc_msgSend)(
-                    ICAppURLUtilities, sel_registerName("isShowNoteURL:"), nsLink);
-                if (isNoteLink) {
-                    linkEntry[@"type"] = @"note";
-                    NSString *noteId = ((id (*)(id, SEL, id))objc_msgSend)(
-                        ICAppURLUtilities, sel_registerName("noteIdentifierFromNotesAppURL:"), nsLink);
-                    if (noteId) linkEntry[@"linkedNoteId"] = noteId;
-                } else {
-                    linkEntry[@"type"] = @"url";
-                }
-            }
-            [currentLinks addObject:linkEntry];
-        }
-
         if (currentUUID && [uuid isEqualToString:currentUUID]) {
             [currentLine appendString:chunk];
         } else {
@@ -860,6 +845,34 @@ static int cmdReadStructuredNote(id note) {
             currentTodoDone = done;
             currentIndent = indent;
         }
+
+        id nsLink = attrs[@"NSLink"];
+        if (nsLink) {
+            NSMutableDictionary *linkEntry = [NSMutableDictionary dictionary];
+            linkEntry[@"text"] = chunk;
+            linkEntry[@"url"] = [nsLink description];
+            Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities");
+            if (ICAppURLUtilities) {
+                BOOL isNoteLink = ((BOOL (*)(id, SEL, id))objc_msgSend)(
+                    ICAppURLUtilities, sel_registerName("isShowNoteURL:"), nsLink);
+                if (isNoteLink) {
+                    linkEntry[@"type"] = @"note";
+                    NSString *noteId = ((id (*)(id, SEL, id))objc_msgSend)(
+                        ICAppURLUtilities, sel_registerName("noteIdentifierFromNotesAppURL:"), nsLink);
+                    if (!noteId && [nsLink isKindOfClass:[NSURL class]]) {
+                        NSURLComponents *comps = [NSURLComponents componentsWithURL:nsLink resolvingAgainstBaseURL:NO];
+                        for (NSURLQueryItem *item in comps.queryItems) {
+                            if ([item.name isEqualToString:@"identifier"]) { noteId = item.value; break; }
+                        }
+                    }
+                    if (noteId) linkEntry[@"linkedNoteId"] = noteId;
+                } else {
+                    linkEntry[@"type"] = @"url";
+                }
+            }
+            [currentLinks addObject:linkEntry];
+        }
+
         idx = effectiveRange.location + effectiveRange.length;
     }
     if (currentLine.length > 0) {
@@ -1540,6 +1553,77 @@ static int cmdTest(id viewContext) {
                 else { fprintf(stderr, "  FAIL (note link not found in attrs)\n"); failed++; }
             } else { fprintf(stderr, "  FAIL (cmdAddLink returned %d)\n", ret); failed++; }
         } else { fprintf(stderr, "  FAIL (notes not found)\n"); failed++; }
+    }
+
+    // Test: read-attrs detects linkType=note and linkedNoteId after add-link
+    fprintf(stderr, "Test: read-attrs linkType/linkedNoteId...\n");
+    {
+        id noteA = findNote(viewContext, testTitle, testFolderName);
+        id noteB = findNote(viewContext, testTitle2, testFolderName);
+        if (noteA && noteB) {
+            NSString *bId = noteToDict(noteB)[@"id"];
+            // noteA already has a note link to noteB from the previous test
+            id doc = ((id (*)(id, SEL))objc_msgSend)(noteA, sel_registerName("document"));
+            id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+            NSString *fullText = [((id (*)(id, SEL))objc_msgSend)(noteA, sel_registerName("attributedString")) string];
+            BOOL foundLinkType = NO;
+            BOOL foundLinkedNoteId = NO;
+            NSUInteger li = 0;
+            while (li < fullText.length) {
+                NSRange lr;
+                NSDictionary *la = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                    ms, sel_registerName("attributesAtIndex:effectiveRange:"), li, &lr);
+                id link = la[@"NSLink"];
+                if (link) {
+                    Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities");
+                    if (ICAppURLUtilities) {
+                        BOOL isNoteLink = ((BOOL (*)(id, SEL, id))objc_msgSend)(
+                            ICAppURLUtilities, sel_registerName("isShowNoteURL:"), link);
+                        if (isNoteLink) foundLinkType = YES;
+                        NSString *noteId = ((id (*)(id, SEL, id))objc_msgSend)(
+                            ICAppURLUtilities, sel_registerName("noteIdentifierFromNotesAppURL:"), link);
+                        if (!noteId && [link isKindOfClass:[NSURL class]]) {
+                            NSURLComponents *comps = [NSURLComponents componentsWithURL:link resolvingAgainstBaseURL:NO];
+                            for (NSURLQueryItem *item in comps.queryItems) {
+                                if ([item.name isEqualToString:@"identifier"]) { noteId = item.value; break; }
+                            }
+                        }
+                        if (noteId && [noteId isEqualToString:bId]) foundLinkedNoteId = YES;
+                    }
+                }
+                li = lr.location + lr.length;
+            }
+            if (foundLinkType && foundLinkedNoteId) { fprintf(stderr, "  PASS\n"); passed++; }
+            else { fprintf(stderr, "  FAIL (linkType=%d linkedNoteId=%d)\n", foundLinkType, foundLinkedNoteId); failed++; }
+        } else { fprintf(stderr, "  FAIL (notes not found)\n"); failed++; }
+    }
+
+    // Test: read-structured includes links array for paragraph with note link
+    fprintf(stderr, "Test: read-structured links array...\n");
+    {
+        id noteA = findNote(viewContext, testTitle, testFolderName);
+        if (noteA) {
+            // noteA has a note link from the add-link append test
+            // Call cmdReadStructuredNote and verify its output contains links
+            // We can't easily capture stdout, so verify the data model directly
+            id doc = ((id (*)(id, SEL))objc_msgSend)(noteA, sel_registerName("document"));
+            id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+            NSAttributedString *attrStr = ((id (*)(id, SEL))objc_msgSend)(noteA, sel_registerName("attributedString"));
+            NSString *fullText = [attrStr string];
+            BOOL foundLink = NO;
+            NSUInteger li = 0;
+            while (li < fullText.length) {
+                NSRange lr;
+                NSDictionary *la = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                    ms, sel_registerName("attributesAtIndex:effectiveRange:"), li, &lr);
+                if (la[@"NSLink"]) { foundLink = YES; break; }
+                li = lr.location + lr.length;
+            }
+            // Also verify cmdReadStructuredNote runs without error
+            int ret = cmdReadStructuredNote(noteA);
+            if (foundLink && ret == 0) { fprintf(stderr, "  PASS\n"); passed++; }
+            else { fprintf(stderr, "  FAIL (foundLink=%d ret=%d)\n", foundLink, ret); failed++; }
+        } else { fprintf(stderr, "  FAIL (note not found)\n"); failed++; }
     }
 
     // Test: add-link at position

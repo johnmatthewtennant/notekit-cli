@@ -457,28 +457,106 @@ static int cmdSetAttr(id viewContext, NSString *identifier,
     NSUInteger msLen = ((NSUInteger (*)(id, SEL))objc_msgSend)(ms, sel_registerName("length"));
     if (offset > msLen || length > msLen - offset) errorExit(@"Range exceeds note length");
 
-    id style = [[ICTTParagraphStyleClass alloc] init];
+    BOOL hasStyleOpts = (attrOpts[@"style"] || attrOpts[@"indent"] || attrOpts[@"todo-done"]);
+    BOOL hasLinkOpt = (attrOpts[@"link"] != nil);
 
-    if (attrOpts[@"style"]) {
-        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(style, sel_registerName("setStyle:"), [attrOpts[@"style"] integerValue]);
-    }
-    if (attrOpts[@"indent"]) {
-        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(style, sel_registerName("setIndent:"), [attrOpts[@"indent"] integerValue]);
-    }
-    if (attrOpts[@"todo-done"]) {
-        BOOL done = [attrOpts[@"todo-done"] isEqualToString:@"true"];
-        id todo = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
-            [ICTTTodoClass alloc], sel_registerName("initWithIdentifier:done:"), [NSUUID UUID], done);
-        ((void (*)(id, SEL, id))objc_msgSend)(style, sel_registerName("setTodo:"), todo);
-        // Default to checklist style if setting todo
-        if (!attrOpts[@"style"]) {
-            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(style, sel_registerName("setStyle:"), 103);
+    // Validate URL upfront if --link is provided
+    NSURL *linkURL = nil;
+    if (hasLinkOpt) {
+        NSString *linkStr = attrOpts[@"link"];
+        if (linkStr.length > 0) {
+            linkURL = [NSURL URLWithString:linkStr];
+            if (!linkURL) {
+                errorExit([NSString stringWithFormat:@"Invalid URL: %@", linkStr]);
+            }
+            NSString *scheme = [linkURL.scheme lowercaseString];
+            if (!scheme || (![scheme isEqualToString:@"http"] &&
+                            ![scheme isEqualToString:@"https"] &&
+                            ![scheme isEqualToString:@"mailto"])) {
+                errorExit([NSString stringWithFormat:
+                    @"Unsupported URL scheme '%@'. Allowed: http, https, mailto", scheme ?: @"(none)"]);
+            }
         }
+        // If linkStr.length == 0, linkURL stays nil => link will be removed
+    }
+
+    if (length == 0) {
+        errorExit(@"--length must be greater than 0 for set-attr");
     }
 
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("beginEditing"));
-    ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
-        @{@"TTStyle": style}, NSMakeRange(offset, length));
+
+    // Enumerate existing attribute runs in the target range (per-run patch strategy)
+    NSUInteger idx = offset;
+    NSUInteger end = offset + length;
+
+    while (idx < end) {
+        NSRange effectiveRange;
+        NSDictionary *existingAttrs = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+            ms, sel_registerName("attributesAtIndex:effectiveRange:"), idx, &effectiveRange);
+
+        // Intersect effectiveRange with our target range
+        NSUInteger subStart = MAX(effectiveRange.location, offset);
+        NSUInteger subEnd = MIN(effectiveRange.location + effectiveRange.length, end);
+        NSRange subRange = NSMakeRange(subStart, subEnd - subStart);
+
+        // Build new attrs dict from existing (preserves TTStrikethrough, attachments, etc.)
+        NSMutableDictionary *patchedAttrs = [NSMutableDictionary dictionary];
+        for (NSString *key in existingAttrs) {
+            patchedAttrs[key] = existingAttrs[key];
+        }
+
+        // Apply style delta if requested
+        if (hasStyleOpts) {
+            id style = [[ICTTParagraphStyleClass alloc] init];
+            // Start from existing style as base, then override requested fields
+            id existingStyle = existingAttrs[@"TTStyle"];
+            if (existingStyle) {
+                ((void (*)(id, SEL, NSInteger))objc_msgSend)(style, sel_registerName("setStyle:"),
+                    ((NSInteger (*)(id, SEL))objc_msgSend)(existingStyle, sel_registerName("style")));
+                ((void (*)(id, SEL, NSUInteger))objc_msgSend)(style, sel_registerName("setIndent:"),
+                    ((NSUInteger (*)(id, SEL))objc_msgSend)(existingStyle, sel_registerName("indent")));
+                id existingTodo = ((id (*)(id, SEL))objc_msgSend)(existingStyle, sel_registerName("todo"));
+                if (existingTodo) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(style, sel_registerName("setTodo:"), existingTodo);
+                }
+            }
+            if (attrOpts[@"style"]) {
+                ((void (*)(id, SEL, NSInteger))objc_msgSend)(style, sel_registerName("setStyle:"),
+                    [attrOpts[@"style"] integerValue]);
+            }
+            if (attrOpts[@"indent"]) {
+                ((void (*)(id, SEL, NSUInteger))objc_msgSend)(style, sel_registerName("setIndent:"),
+                    [attrOpts[@"indent"] integerValue]);
+            }
+            if (attrOpts[@"todo-done"]) {
+                BOOL done = [attrOpts[@"todo-done"] isEqualToString:@"true"];
+                id todo = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
+                    [ICTTTodoClass alloc], sel_registerName("initWithIdentifier:done:"), [NSUUID UUID], done);
+                ((void (*)(id, SEL, id))objc_msgSend)(style, sel_registerName("setTodo:"), todo);
+                if (!attrOpts[@"style"]) {
+                    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(style, sel_registerName("setStyle:"), 103);
+                }
+            }
+            patchedAttrs[@"TTStyle"] = style;
+        }
+
+        // Apply link delta if requested
+        if (hasLinkOpt) {
+            if (linkURL) {
+                patchedAttrs[@"NSLink"] = linkURL;
+            } else {
+                [patchedAttrs removeObjectForKey:@"NSLink"];
+            }
+        }
+
+        // Write back patched attrs for this sub-range
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
+            patchedAttrs, subRange);
+
+        idx = subEnd;
+    }
+
     ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
         note, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, msLen), 0);
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("endEditing"));
@@ -1270,6 +1348,302 @@ static int cmdTest(id viewContext) {
         [viewContext save:nil];
     }
 
+    // --- Hyperlink tests ---
+
+    // Test: Set link on a text range
+    fprintf(stderr, "Test: Set link on text range...\n");
+    {
+        id note = findNote(viewContext, testTitle, testFolderName);
+        NSString *noteID = noteToDict(note)[@"id"];
+        // Body starts after title + newline
+        NSUInteger linkOffset = [testTitle length] + 1;
+        int ret = cmdSetAttr(viewContext, noteID, linkOffset, 13,
+            @{@"link": @"https://example.com/test"});
+        if (ret == 0) {
+            note = findNote(viewContext, testTitle, testFolderName);
+            id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+            id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+            NSRange lr;
+            NSDictionary *la = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                ms, sel_registerName("attributesAtIndex:effectiveRange:"), linkOffset, &lr);
+            NSURL *foundLink = la[@"NSLink"];
+            if (foundLink && [[foundLink absoluteString] containsString:@"example.com"]) {
+                fprintf(stderr, "  PASS\n"); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (link not found: attrs=%s)\n", [[la description] UTF8String]); failed++;
+            }
+        } else { fprintf(stderr, "  FAIL (cmdSetAttr returned %d)\n", ret); failed++; }
+    }
+
+    // Test: Link-only update preserves style
+    fprintf(stderr, "Test: Link preserves existing style...\n");
+    {
+        id note = findNote(viewContext, testTitle, testFolderName);
+        NSString *noteID = noteToDict(note)[@"id"];
+        NSUInteger linkOffset = [testTitle length] + 1;
+        id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+        id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+        NSRange sr;
+        NSDictionary *beforeAttrs = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+            ms, sel_registerName("attributesAtIndex:effectiveRange:"), linkOffset, &sr);
+        id beforeStyle = beforeAttrs[@"TTStyle"];
+        int beforeStyleVal = beforeStyle ? (int)((NSInteger (*)(id, SEL))objc_msgSend)(beforeStyle, sel_registerName("style")) : -1;
+        NSURL *beforeLink = beforeAttrs[@"NSLink"];
+
+        if (beforeStyleVal >= 0 && beforeLink) {
+            fprintf(stderr, "  PASS (style=%d preserved with link)\n", beforeStyleVal); passed++;
+        } else {
+            fprintf(stderr, "  FAIL (style=%d, link=%s)\n", beforeStyleVal, beforeLink ? "yes" : "no"); failed++;
+        }
+    }
+
+    // Test: Style-only update preserves existing link
+    fprintf(stderr, "Test: Style update preserves link...\n");
+    {
+        id note = findNote(viewContext, testTitle, testFolderName);
+        NSString *noteID = noteToDict(note)[@"id"];
+        NSUInteger linkOffset = [testTitle length] + 1;
+        // Change style to heading (1) on the range that has a link
+        int ret = cmdSetAttr(viewContext, noteID, linkOffset, 13, @{@"style": @"1"});
+        if (ret == 0) {
+            note = findNote(viewContext, testTitle, testFolderName);
+            id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+            id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+            NSRange lr;
+            NSDictionary *la = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                ms, sel_registerName("attributesAtIndex:effectiveRange:"), linkOffset, &lr);
+            NSURL *foundLink = la[@"NSLink"];
+            id styleObj = la[@"TTStyle"];
+            int styleVal = styleObj ? (int)((NSInteger (*)(id, SEL))objc_msgSend)(styleObj, sel_registerName("style")) : -1;
+            if (foundLink && styleVal == 1) {
+                fprintf(stderr, "  PASS (link preserved, style=%d)\n", styleVal); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (link=%s, style=%d)\n", foundLink ? "yes" : "no", styleVal); failed++;
+            }
+        } else { fprintf(stderr, "  FAIL\n"); failed++; }
+        // Restore style back to body (3)
+        note = findNote(viewContext, testTitle, testFolderName);
+        NSString *restoreID = noteToDict(note)[@"id"];
+        cmdSetAttr(viewContext, restoreID, [testTitle length] + 1, 13, @{@"style": @"3"});
+    }
+
+    // Test: Remove link
+    fprintf(stderr, "Test: Remove link...\n");
+    {
+        id note = findNote(viewContext, testTitle, testFolderName);
+        NSString *noteID = noteToDict(note)[@"id"];
+        NSUInteger linkOffset = [testTitle length] + 1;
+        int ret = cmdSetAttr(viewContext, noteID, linkOffset, 13, @{@"link": @""});
+        if (ret == 0) {
+            note = findNote(viewContext, testTitle, testFolderName);
+            id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+            id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+            NSRange lr;
+            NSDictionary *la = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                ms, sel_registerName("attributesAtIndex:effectiveRange:"), linkOffset, &lr);
+            if (!la[@"NSLink"]) {
+                id styleObj = la[@"TTStyle"];
+                int styleVal = styleObj ? (int)((NSInteger (*)(id, SEL))objc_msgSend)(styleObj, sel_registerName("style")) : -1;
+                if (styleVal >= 0) {
+                    fprintf(stderr, "  PASS (link removed, style=%d preserved)\n", styleVal); passed++;
+                } else {
+                    fprintf(stderr, "  FAIL (link removed but style lost)\n"); failed++;
+                }
+            } else {
+                fprintf(stderr, "  FAIL (link still present)\n"); failed++;
+            }
+        } else { fprintf(stderr, "  FAIL\n"); failed++; }
+    }
+
+    // Test: Invalid URL returns error (subprocess test)
+    fprintf(stderr, "Test: Invalid URL rejected...\n");
+    {
+        char pathBuf[4096];
+        uint32_t pathSize = sizeof(pathBuf);
+        _NSGetExecutablePath(pathBuf, &pathSize);
+        id note = findNote(viewContext, testTitle, testFolderName);
+        NSString *noteID = noteToDict(note)[@"id"];
+        NSUInteger linkOffset = [testTitle length] + 1;
+        // Use spaces in URL which NSURL rejects
+        NSString *cmd = [NSString stringWithFormat:@"%s set-attr --id %@ --offset %lu --length 13 --link 'has space in url' 2>/dev/null",
+            pathBuf, noteID, (unsigned long)linkOffset];
+        int ret = system([cmd UTF8String]);
+        if (ret != 0) {
+            fprintf(stderr, "  PASS (rejected with exit code %d)\n", WEXITSTATUS(ret)); passed++;
+        } else {
+            fprintf(stderr, "  FAIL (should have been rejected)\n"); failed++;
+        }
+    }
+
+    // Test: Rejected URL scheme
+    fprintf(stderr, "Test: javascript: scheme rejected...\n");
+    {
+        char pathBuf[4096];
+        uint32_t pathSize = sizeof(pathBuf);
+        _NSGetExecutablePath(pathBuf, &pathSize);
+        id note = findNote(viewContext, testTitle, testFolderName);
+        NSString *noteID = noteToDict(note)[@"id"];
+        NSUInteger linkOffset = [testTitle length] + 1;
+        NSString *cmd = [NSString stringWithFormat:@"%s set-attr --id %@ --offset %lu --length 13 --link 'javascript:alert(1)' 2>/dev/null",
+            pathBuf, noteID, (unsigned long)linkOffset];
+        int ret = system([cmd UTF8String]);
+        if (ret != 0) {
+            fprintf(stderr, "  PASS (rejected with exit code %d)\n", WEXITSTATUS(ret)); passed++;
+        } else {
+            fprintf(stderr, "  FAIL (should have been rejected)\n"); failed++;
+        }
+    }
+
+    // Test: Multi-run range preservation (set link across body + checklist)
+    fprintf(stderr, "Test: Multi-run link preserves styles...\n");
+    {
+        id note = findNote(viewContext, testTitle, testFolderName);
+        NSString *noteID = noteToDict(note)[@"id"];
+        id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+        id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+        NSUInteger msLen = ((NSUInteger (*)(id, SEL))objc_msgSend)(ms, sel_registerName("length"));
+
+        NSUInteger multiOffset = [testTitle length] + 1;
+        NSUInteger multiLength = msLen - multiOffset;
+        if (multiLength > 0) {
+            // Read styles before
+            NSRange r1;
+            NSDictionary *a1 = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                ms, sel_registerName("attributesAtIndex:effectiveRange:"), multiOffset, &r1);
+            id s1 = a1[@"TTStyle"];
+            int style1 = s1 ? (int)((NSInteger (*)(id, SEL))objc_msgSend)(s1, sel_registerName("style")) : -1;
+
+            int ret = cmdSetAttr(viewContext, noteID, multiOffset, multiLength,
+                @{@"link": @"https://multi.example.com"});
+            if (ret == 0) {
+                note = findNote(viewContext, testTitle, testFolderName);
+                doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+                ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+
+                NSDictionary *a1After = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                    ms, sel_registerName("attributesAtIndex:effectiveRange:"), multiOffset, &r1);
+                id s1After = a1After[@"TTStyle"];
+                int style1After = s1After ? (int)((NSInteger (*)(id, SEL))objc_msgSend)(s1After, sel_registerName("style")) : -1;
+                NSURL *link1 = a1After[@"NSLink"];
+
+                if (style1 == style1After && link1) {
+                    fprintf(stderr, "  PASS (style=%d preserved, link set)\n", style1After); passed++;
+                } else {
+                    fprintf(stderr, "  FAIL (style %d->%d, link=%s)\n", style1, style1After, link1 ? "yes" : "no"); failed++;
+                }
+
+                // Clean up multi-run links
+                cmdSetAttr(viewContext, noteToDict(findNote(viewContext, testTitle, testFolderName))[@"id"],
+                    multiOffset, multiLength, @{@"link": @""});
+            } else { fprintf(stderr, "  FAIL (cmdSetAttr returned %d)\n", ret); failed++; }
+        } else { fprintf(stderr, "  FAIL (no body text)\n"); failed++; }
+    }
+
+    // Test: Link on checklist preserves todo state
+    fprintf(stderr, "Test: Link on checklist preserves todo...\n");
+    {
+        id note = findNote(viewContext, testTitle, testFolderName);
+        NSString *noteID = noteToDict(note)[@"id"];
+        NSString *noteText = [((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attributedString")) string];
+        NSRange clRange = [noteText rangeOfString:@"Checklist item"];
+        if (clRange.location != NSNotFound) {
+            id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+            id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+            NSRange er;
+            NSDictionary *beforeAttrs = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                ms, sel_registerName("attributesAtIndex:effectiveRange:"), clRange.location, &er);
+            id beforeStyle = beforeAttrs[@"TTStyle"];
+            id beforeTodo = beforeStyle ? ((id (*)(id, SEL))objc_msgSend)(beforeStyle, sel_registerName("todo")) : nil;
+            BOOL hadTodo = (beforeTodo != nil);
+
+            int ret = cmdSetAttr(viewContext, noteID, clRange.location, clRange.length,
+                @{@"link": @"https://checklist.example.com"});
+            if (ret == 0) {
+                note = findNote(viewContext, testTitle, testFolderName);
+                doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+                ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+                NSDictionary *afterAttrs = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                    ms, sel_registerName("attributesAtIndex:effectiveRange:"), clRange.location, &er);
+                id afterStyle = afterAttrs[@"TTStyle"];
+                id afterTodo = afterStyle ? ((id (*)(id, SEL))objc_msgSend)(afterStyle, sel_registerName("todo")) : nil;
+                NSURL *afterLink = afterAttrs[@"NSLink"];
+                int afterStyleVal = afterStyle ? (int)((NSInteger (*)(id, SEL))objc_msgSend)(afterStyle, sel_registerName("style")) : -1;
+
+                if (hadTodo && afterTodo && afterLink && afterStyleVal == 103) {
+                    fprintf(stderr, "  PASS (todo preserved, style=103, link set)\n"); passed++;
+                } else {
+                    fprintf(stderr, "  FAIL (hadTodo=%d, afterTodo=%s, link=%s, style=%d)\n",
+                        hadTodo, afterTodo ? "yes" : "no", afterLink ? "yes" : "no", afterStyleVal); failed++;
+                }
+            } else { fprintf(stderr, "  FAIL\n"); failed++; }
+        } else { fprintf(stderr, "  FAIL (checklist item not found)\n"); failed++; }
+    }
+
+    // Test: Todo-done update preserves existing link
+    fprintf(stderr, "Test: Todo-done preserves link...\n");
+    {
+        id note = findNote(viewContext, testTitle, testFolderName);
+        NSString *noteID = noteToDict(note)[@"id"];
+        NSString *noteText = [((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attributedString")) string];
+        NSRange clRange = [noteText rangeOfString:@"Checklist item"];
+        if (clRange.location != NSNotFound) {
+            int ret = cmdSetAttr(viewContext, noteID, clRange.location, clRange.length,
+                @{@"todo-done": @"true"});
+            if (ret == 0) {
+                note = findNote(viewContext, testTitle, testFolderName);
+                id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+                id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+                NSRange er;
+                NSDictionary *afterAttrs = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                    ms, sel_registerName("attributesAtIndex:effectiveRange:"), clRange.location, &er);
+                NSURL *afterLink = afterAttrs[@"NSLink"];
+                id afterStyle = afterAttrs[@"TTStyle"];
+                id afterTodo = afterStyle ? ((id (*)(id, SEL))objc_msgSend)(afterStyle, sel_registerName("todo")) : nil;
+                BOOL afterDone = afterTodo ? ((BOOL (*)(id, SEL))objc_msgSend)(afterTodo, sel_registerName("done")) : NO;
+
+                if (afterLink && afterTodo && afterDone) {
+                    fprintf(stderr, "  PASS (link preserved, todo done=true)\n"); passed++;
+                } else {
+                    fprintf(stderr, "  FAIL (link=%s, todo=%s, done=%d)\n",
+                        afterLink ? "yes" : "no", afterTodo ? "yes" : "no", afterDone); failed++;
+                }
+            } else { fprintf(stderr, "  FAIL\n"); failed++; }
+        } else { fprintf(stderr, "  FAIL (checklist item not found)\n"); failed++; }
+    }
+
+    // Test: Indent update preserves todo state
+    fprintf(stderr, "Test: Indent preserves todo state...\n");
+    {
+        id note = findNote(viewContext, testTitle, testFolderName);
+        NSString *noteID = noteToDict(note)[@"id"];
+        NSString *noteText = [((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attributedString")) string];
+        NSRange clRange = [noteText rangeOfString:@"Checklist item"];
+        if (clRange.location != NSNotFound) {
+            int ret = cmdSetAttr(viewContext, noteID, clRange.location, clRange.length,
+                @{@"indent": @"1"});
+            if (ret == 0) {
+                note = findNote(viewContext, testTitle, testFolderName);
+                id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+                id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+                NSRange er;
+                NSDictionary *afterAttrs = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                    ms, sel_registerName("attributesAtIndex:effectiveRange:"), clRange.location, &er);
+                id afterStyle = afterAttrs[@"TTStyle"];
+                id afterTodo = afterStyle ? ((id (*)(id, SEL))objc_msgSend)(afterStyle, sel_registerName("todo")) : nil;
+                BOOL afterDone = afterTodo ? ((BOOL (*)(id, SEL))objc_msgSend)(afterTodo, sel_registerName("done")) : NO;
+                NSUInteger afterIndent = afterStyle ? ((NSUInteger (*)(id, SEL))objc_msgSend)(afterStyle, sel_registerName("indent")) : 0;
+                int afterStyleVal = afterStyle ? (int)((NSInteger (*)(id, SEL))objc_msgSend)(afterStyle, sel_registerName("style")) : -1;
+
+                if (afterTodo && afterDone && afterIndent == 1 && afterStyleVal == 103) {
+                    fprintf(stderr, "  PASS (todo preserved, done=true, indent=1, style=103)\n"); passed++;
+                } else {
+                    fprintf(stderr, "  FAIL (todo=%s, done=%d, indent=%lu, style=%d)\n",
+                        afterTodo ? "yes" : "no", afterDone, (unsigned long)afterIndent, afterStyleVal); failed++;
+                }
+            } else { fprintf(stderr, "  FAIL\n"); failed++; }
+        } else { fprintf(stderr, "  FAIL (checklist item not found)\n"); failed++; }
+    }
+
     // Cleanup
 
     // Test: bodyOffsetForNote
@@ -1629,7 +2003,7 @@ static void usage(void) {
     fprintf(stderr, "  notes-cli-v2 append --id <id> --text <text>\n");
     fprintf(stderr, "  notes-cli-v2 insert --id <id> --text <text> --position <n> [--body-offset]\n");
     fprintf(stderr, "  notes-cli-v2 delete-range --id <id> --start <n> --length <n> [--body-offset]\n");
-    fprintf(stderr, "  notes-cli-v2 set-attr --id <id> --offset <n> --length <n> [--style <n>] [--indent <n>] [--todo-done true|false] [--body-offset]\n");
+    fprintf(stderr, "  notes-cli-v2 set-attr --id <id> --offset <n> --length <n> [--style <n>] [--indent <n>] [--todo-done true|false] [--link <url>] [--body-offset]\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "  --body-offset    Treat offset/position/start as relative to body text (after title).\n");
     fprintf(stderr, "                   Use this when offsets come from 'notekit read' output.\n");

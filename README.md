@@ -26,7 +26,7 @@ notekit read-attrs (<title> | --title <title>) [--folder <name>]
 notekit append (<title> | --title <title>) (<text> | --text <text>) [--folder <name>]
 notekit insert (<title> | --title <title>) (<text> | --text <text>) --position <n> [--folder <name>]
 notekit delete-range (<title> | --title <title>) --start <n> --length <n> [--folder <name>]
-notekit set-attr (<title> | --title <title>) --offset <n> --length <n> [--style <n>] [--indent <n>]
+notekit set-attr (<title> | --title <title>) --offset <n> --length <n> [--style <n>] [--indent <n>] [--link <url>]
 notekit search (<query> | --query <query>) [--folder <name>]
 notekit help                               # full usage
 ```

@@ -1,6 +1,6 @@
 # NoteKit CLI
 
-Command-line interface for Apple Notes. Built on the private NotesShared framework, which enables structured editing (headings, checklists, styles at character offsets), folder management, search, and pinning — none of which are supported by AppleScript.
+Command-line interface for Apple Notes. Built on the private NotesShared framework, which enables structured editing (headings, checklists, lists, styles at character offsets), folder management, search, and pinning — none of which are supported by AppleScript.
 
 ## Prerequisite check (auto-generated)
 
@@ -11,10 +11,23 @@ Command-line interface for Apple Notes. Built on the private NotesShared framewo
 ## Basic usage
 
 - `notekit list` — list all notes
-- `notekit read "Title"` — read a note's content
+- `notekit read --title "Title"` — read a note's content
 - `notekit create-empty --folder "Folder"` — create a new note
-- `notekit append "Title" "text"` — append text to a note
-- `notekit search "query"` — search notes
+- `notekit append --id <id> --text "text"` — append text to a note
+- `notekit append --id <id> --text "item" --style 100` — append a dash list item
+- `notekit append --id <id> --text "item" --style 102` — append a numbered list item
+- `notekit append --id <id> --text "item" --style 103` — append a checklist item
+- `notekit search --query "query"` — search notes
+
+## Styles
+
+Valid style values for `--style`:
+- `0` — title
+- `1` — heading
+- `3` — body (default)
+- `100` — dash list (unordered/bullet)
+- `102` — numbered list (ordered)
+- `103` — checklist
 
 ## `notekit --help` (auto-executed)
 

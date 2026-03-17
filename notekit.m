@@ -1283,26 +1283,26 @@ static void usage(void) {
     fprintf(stderr, "Primitives:\n");
     fprintf(stderr, "  notes-cli-v2 folders\n");
     fprintf(stderr, "  notes-cli-v2 list [--folder <name>] [--limit <n>]\n");
-    fprintf(stderr, "  notes-cli-v2 get (<title> | --title <title> | --id <id>) [--folder <name>]\n");
-    fprintf(stderr, "  notes-cli-v2 read (<title> | --title <title> | --id <id>) [--folder <name>]\n");
-    fprintf(stderr, "  notes-cli-v2 read-attrs (<title> | --title <title> | --id <id>) [--folder <name>]\n");
+    fprintf(stderr, "  notes-cli-v2 get (--title <title> | --id <id>) [--folder <name>]\n");
+    fprintf(stderr, "  notes-cli-v2 read (--title <title> | --id <id>) [--folder <name>]\n");
+    fprintf(stderr, "  notes-cli-v2 read-attrs (--title <title> | --id <id>) [--folder <name>]\n");
     fprintf(stderr, "  notes-cli-v2 create-empty --folder <name>\n");
     fprintf(stderr, "  notes-cli-v2 delete --id <id>\n");
-    fprintf(stderr, "  notes-cli-v2 append --id <id> (<text> | --text <text>)\n");
-    fprintf(stderr, "  notes-cli-v2 insert --id <id> (<text> | --text <text>) --position <n>\n");
+    fprintf(stderr, "  notes-cli-v2 append --id <id> --text <text>\n");
+    fprintf(stderr, "  notes-cli-v2 insert --id <id> --text <text> --position <n>\n");
     fprintf(stderr, "  notes-cli-v2 delete-range --id <id> --start <n> --length <n>\n");
     fprintf(stderr, "  notes-cli-v2 set-attr --id <id> --offset <n> --length <n> [--style <n>] [--indent <n>] [--todo-done true|false]\n");
     fprintf(stderr, "  notes-cli-v2 move --id <id> --to <to-folder>\n");
-    fprintf(stderr, "  notes-cli-v2 create-folder (<name> | --name <name>)\n");
-    fprintf(stderr, "  notes-cli-v2 delete-folder (<name> | --name <name>)\n");
-    fprintf(stderr, "  notes-cli-v2 search (<query> | --query <query>) [--folder <name>]\n");
+    fprintf(stderr, "  notes-cli-v2 create-folder --name <name>\n");
+    fprintf(stderr, "  notes-cli-v2 delete-folder --name <name>\n");
+    fprintf(stderr, "  notes-cli-v2 search --query <query> [--folder <name>]\n");
     fprintf(stderr, "  notes-cli-v2 pin --id <id>\n");
     fprintf(stderr, "  notes-cli-v2 unpin --id <id>\n");
     fprintf(stderr, "\n  Convenience (composed from primitives):\n");
     fprintf(stderr, "  notes-cli-v2 replace --id <id> --search <text> --replacement <text>\n");
-    fprintf(stderr, "  notes-cli-v2 read-structured (<title> | --title <title> | --id <id>) [--folder <name>]\n");
+    fprintf(stderr, "  notes-cli-v2 read-structured (--title <title> | --id <id>) [--folder <name>]\n");
     fprintf(stderr, "  notes-cli-v2 duplicate --id <id> [--new-title <new-title>]\n");
-    fprintf(stderr, "  notes-cli-v2 delete-line --id <id> (<search-text> | --search-text <search-text>)\n");
+    fprintf(stderr, "  notes-cli-v2 delete-line --id <id> --search-text <search-text>\n");
     fprintf(stderr, "\n  Testing:\n");
     fprintf(stderr, "  notes-cli-v2 test\n");
 }
@@ -1346,6 +1346,15 @@ int main(int argc, const char *argv[]) {
         NSString *folderName = opts[@"folder"];
         id viewContext = getViewContext();
 
+        // Reject unexpected positional arguments
+        if (positional.count > 0 &&
+            ![command isEqualToString:@"folders"] &&
+            ![command isEqualToString:@"test"]) {
+            fprintf(stderr, "Error: unexpected argument '%s'. All arguments must use --flag syntax.\n", [positional[0] UTF8String]);
+            usage();
+            return 1;
+        }
+
         if ([command isEqualToString:@"folders"]) {
             return cmdFolders(viewContext);
 
@@ -1355,47 +1364,43 @@ int main(int argc, const char *argv[]) {
 
         } else if ([command isEqualToString:@"get"]) {
             NSString *noteID = opts[@"id"];
-            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
-            if (!noteID && !title) { fprintf(stderr, "Error: title or --id required\n"); usage(); return 1; }
+            if (!noteID && !kwTitle) { fprintf(stderr, "Error: --title or --id required\n"); usage(); return 1; }
             if (noteID) {
                 id note = findNoteByID(viewContext, noteID);
                 if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", noteID]);
                 return cmdGetNote(note);
             }
-            return cmdGet(viewContext, title, folderName);
+            return cmdGet(viewContext, kwTitle, folderName);
 
         } else if ([command isEqualToString:@"read"]) {
             NSString *noteID = opts[@"id"];
-            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
-            if (!noteID && !title) { fprintf(stderr, "Error: title or --id required\n"); usage(); return 1; }
+            if (!noteID && !kwTitle) { fprintf(stderr, "Error: --title or --id required\n"); usage(); return 1; }
             if (noteID) {
                 id note = findNoteByID(viewContext, noteID);
                 if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", noteID]);
                 return cmdReadNote(note);
             }
-            return cmdRead(viewContext, title, folderName);
+            return cmdRead(viewContext, kwTitle, folderName);
 
         } else if ([command isEqualToString:@"read-attrs"]) {
             NSString *noteID = opts[@"id"];
-            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
-            if (!noteID && !title) { fprintf(stderr, "Error: title or --id required\n"); usage(); return 1; }
+            if (!noteID && !kwTitle) { fprintf(stderr, "Error: --title or --id required\n"); usage(); return 1; }
             if (noteID) {
                 id note = findNoteByID(viewContext, noteID);
                 if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", noteID]);
                 return cmdReadAttrsNote(note);
             }
-            return cmdReadAttrs(viewContext, title, folderName);
+            return cmdReadAttrs(viewContext, kwTitle, folderName);
 
         } else if ([command isEqualToString:@"read-structured"]) {
             NSString *noteID = opts[@"id"];
-            NSString *title = kwTitle ?: (positional.count > 0 ? positional[0] : nil);
-            if (!noteID && !title) { fprintf(stderr, "Error: title or --id required\n"); usage(); return 1; }
+            if (!noteID && !kwTitle) { fprintf(stderr, "Error: --title or --id required\n"); usage(); return 1; }
             if (noteID) {
                 id note = findNoteByID(viewContext, noteID);
                 if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", noteID]);
                 return cmdReadStructuredNote(note);
             }
-            return cmdReadStructured(viewContext, title, folderName);
+            return cmdReadStructured(viewContext, kwTitle, folderName);
 
         } else if ([command isEqualToString:@"set-attr"]) {
             NSString *noteID = opts[@"id"];
@@ -1411,9 +1416,8 @@ int main(int argc, const char *argv[]) {
             return cmdMoveNote(viewContext, noteID, opts[@"to"]);
 
         } else if ([command isEqualToString:@"search"]) {
-            NSString *query = kwQuery ?: (positional.count > 0 ? positional[0] : nil);
-            if (!query) { fprintf(stderr, "Error: query required\n"); usage(); return 1; }
-            return cmdSearch(viewContext, query, folderName);
+            if (!kwQuery) { fprintf(stderr, "Error: --query required\n"); usage(); return 1; }
+            return cmdSearch(viewContext, kwQuery, folderName);
 
         } else if ([command isEqualToString:@"pin"]) {
             NSString *noteID = opts[@"id"];
@@ -1431,14 +1435,12 @@ int main(int argc, const char *argv[]) {
             return cmdDuplicate(viewContext, noteID, kwNewTitle);
 
         } else if ([command isEqualToString:@"create-folder"]) {
-            NSString *name = kwName ?: (positional.count > 0 ? positional[0] : nil);
-            if (!name) { fprintf(stderr, "Error: folder name required\n"); usage(); return 1; }
-            return cmdCreateFolder(viewContext, name);
+            if (!kwName) { fprintf(stderr, "Error: --name required\n"); usage(); return 1; }
+            return cmdCreateFolder(viewContext, kwName);
 
         } else if ([command isEqualToString:@"delete-folder"]) {
-            NSString *name = kwName ?: (positional.count > 0 ? positional[0] : nil);
-            if (!name) { fprintf(stderr, "Error: folder name required\n"); usage(); return 1; }
-            return cmdDeleteFolder(viewContext, name);
+            if (!kwName) { fprintf(stderr, "Error: --name required\n"); usage(); return 1; }
+            return cmdDeleteFolder(viewContext, kwName);
 
         } else if ([command isEqualToString:@"create-empty"]) {
             if (!folderName) { fprintf(stderr, "Error: --folder required\n"); usage(); return 1; }
@@ -1451,18 +1453,16 @@ int main(int argc, const char *argv[]) {
 
         } else if ([command isEqualToString:@"append"]) {
             NSString *noteID = opts[@"id"];
-            NSString *text = kwText ?: (positional.count > 0 ? positional[0] : nil);
             if (!noteID || noteID.length == 0) { fprintf(stderr, "Error: --id required\n"); usage(); return 1; }
-            if (!text) { fprintf(stderr, "Error: text required\n"); usage(); return 1; }
-            return cmdAppend(viewContext, noteID, text);
+            if (!kwText) { fprintf(stderr, "Error: --text required\n"); usage(); return 1; }
+            return cmdAppend(viewContext, noteID, kwText);
 
         } else if ([command isEqualToString:@"insert"]) {
             NSString *noteID = opts[@"id"];
-            NSString *text = kwText ?: (positional.count > 0 ? positional[0] : nil);
             if (!noteID || noteID.length == 0) { fprintf(stderr, "Error: --id required\n"); usage(); return 1; }
-            if (!text) { fprintf(stderr, "Error: text required\n"); usage(); return 1; }
+            if (!kwText) { fprintf(stderr, "Error: --text required\n"); usage(); return 1; }
             if (!opts[@"position"]) { fprintf(stderr, "Error: --position required\n"); usage(); return 1; }
-            return cmdInsert(viewContext, noteID, text, [opts[@"position"] integerValue]);
+            return cmdInsert(viewContext, noteID, kwText, [opts[@"position"] integerValue]);
 
         } else if ([command isEqualToString:@"delete-range"]) {
             NSString *noteID = opts[@"id"];
@@ -1478,10 +1478,9 @@ int main(int argc, const char *argv[]) {
 
         } else if ([command isEqualToString:@"delete-line"]) {
             NSString *noteID = opts[@"id"];
-            NSString *searchText = kwSearchText ?: (positional.count > 0 ? positional[0] : nil);
             if (!noteID || noteID.length == 0) { fprintf(stderr, "Error: --id required\n"); usage(); return 1; }
-            if (!searchText) { fprintf(stderr, "Error: search text required\n"); usage(); return 1; }
-            return cmdDeleteLine(viewContext, noteID, searchText);
+            if (!kwSearchText) { fprintf(stderr, "Error: --search-text required\n"); usage(); return 1; }
+            return cmdDeleteLine(viewContext, noteID, kwSearchText);
 
         } else if ([command isEqualToString:@"test"]) {
             return cmdTest(viewContext);

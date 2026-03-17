@@ -114,8 +114,9 @@ static NSUInteger bodyOffsetForNote(id note) {
 
     NSUInteger idx = 0;
 
-    // Skip leading newline if present (canonical format)
-    if (idx < length && [fullText characterAtIndex:idx] == 0x0A) idx++;
+    // Skip all leading newlines (canonical notes have exactly one, but be
+    // robust against malformed or legacy notes with extra leading newlines)
+    while (idx < length && [fullText characterAtIndex:idx] == 0x0A) idx++;
 
     // Skip title text (all non-newline characters)
     while (idx < length && [fullText characterAtIndex:idx] != 0x0A) idx++;
@@ -1284,7 +1285,10 @@ static int cmdTest(id viewContext) {
                 NSString *bodyFromOffset = [fullText substringFromIndex:bodyOff];
                 // noteAsPlainTextWithoutTitle may include a leading newline; strip it for comparison
                 NSString *trimmedRead = [bodyFromRead stringByTrimmingCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-                if ([bodyFromOffset hasPrefix:[trimmedRead substringToIndex:MIN(10, trimmedRead.length)]]) {
+                // Guard: empty body would trivially pass hasPrefix; fail explicitly
+                if (trimmedRead.length == 0) {
+                    fprintf(stderr, "  FAIL (body is empty, cannot verify offset)\n"); failed++;
+                } else if ([bodyFromOffset hasPrefix:trimmedRead]) {
                     fprintf(stderr, "  PASS (bodyOff=%lu)\n", (unsigned long)bodyOff); passed++;
                 } else {
                     fprintf(stderr, "  FAIL (body mismatch at offset %lu)\n", (unsigned long)bodyOff); failed++;
@@ -1401,7 +1405,55 @@ static int cmdTest(id viewContext) {
         NSUInteger bodyOff = bodyOffsetForNote(toNote);
         if (bodyOff == NSNotFound) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (expected NSNotFound, got %lu)\n", (unsigned long)bodyOff); failed++; }
+        // Note: command-level --body-offset on title-only notes calls errorExit(exit(1)),
+        // so cannot be tested in-process. The helper returns NSNotFound and all three
+        // commands (set-attr, insert, delete-range) check for NSNotFound before errorExit.
         deleteNote(toNote, viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: bodyOffsetForNote with canonical format (\n + title + \n + body)
+    fprintf(stderr, "Test: bodyOffsetForNote canonical format...\n");
+    {
+        id cnNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id cnDoc = ((id (*)(id, SEL))objc_msgSend)(cnNote, sel_registerName("document"));
+        id cnMs = ((id (*)(id, SEL))objc_msgSend)(cnDoc, sel_registerName("mergeableString"));
+        NSString *cnTitle = @"__canonical_test__";
+        NSString *cnBody = @"canonical body text";
+        // Build canonical format: \n + title + \n + body
+        NSString *cnContent = [NSString stringWithFormat:@"\n%@\n%@", cnTitle, cnBody];
+        ((void (*)(id, SEL))objc_msgSend)(cnNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(cnMs, sel_registerName("insertString:atIndex:"), cnContent, 0);
+        id cnStyle = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(cnStyle, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(cnMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": cnStyle}, NSMakeRange(0, 1 + cnTitle.length + 1));
+        id cnBodyStyle = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(cnBodyStyle, sel_registerName("setStyle:"), 3);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(cnMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": cnBodyStyle}, NSMakeRange(1 + cnTitle.length + 1, cnBody.length));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            cnNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, cnContent.length), cnContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(cnNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(cnNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+        NSUInteger cnBodyOff = bodyOffsetForNote(cnNote);
+        // Expected: 1 (leading \n) + title.length + 1 (separator \n) = cnTitle.length + 2
+        NSUInteger expectedOff = 1 + cnTitle.length + 1;
+        if (cnBodyOff == expectedOff) {
+            // Also verify the body text at that offset matches
+            NSAttributedString *cnAttrStr = ((id (*)(id, SEL))objc_msgSend)(cnNote, sel_registerName("attributedString"));
+            NSString *cnFullText = [cnAttrStr string];
+            NSString *bodyAtOffset = [cnFullText substringFromIndex:cnBodyOff];
+            if ([bodyAtOffset hasPrefix:cnBody]) {
+                fprintf(stderr, "  PASS (bodyOff=%lu, expected=%lu)\n", (unsigned long)cnBodyOff, (unsigned long)expectedOff); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (offset correct but body text mismatch: '%s')\n", [bodyAtOffset UTF8String]); failed++;
+            }
+        } else {
+            fprintf(stderr, "  FAIL (bodyOff=%lu, expected=%lu)\n", (unsigned long)cnBodyOff, (unsigned long)expectedOff); failed++;
+        }
+        deleteNote(cnNote, viewContext);
         [viewContext save:nil];
     }
 

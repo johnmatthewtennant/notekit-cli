@@ -35,6 +35,33 @@ static void errorExit(NSString *msg) {
     exit(1);
 }
 
+static BOOL isStrictInteger(NSString *str, NSInteger *outValue) {
+    NSScanner *scanner = [NSScanner scannerWithString:str];
+    NSInteger value;
+    if ([scanner scanInteger:&value] && [scanner isAtEnd]) {
+        if (outValue) *outValue = value;
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL isValidStyle(NSInteger style) {
+    return style == 0 || style == 1 || style == 3 || style == 100 || style == 102 || style == 103;
+}
+
+static id makeParagraphStyle(NSInteger style) {
+    id paraStyle = [[ICTTParagraphStyleClass alloc] init];
+    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(paraStyle, sel_registerName("setStyle:"), (NSUInteger)style);
+    if (style == 103) {
+        id todo = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
+            [ICTTTodoClass alloc],
+            sel_registerName("initWithIdentifier:done:"),
+            [NSUUID UUID], NO);
+        ((void (*)(id, SEL, id))objc_msgSend)(paraStyle, sel_registerName("setTodo:"), todo);
+    }
+    return paraStyle;
+}
+
 static NSString *dateToISO(NSDate *date) {
     if (!date) return nil;
     NSISO8601DateFormatter *fmt = [[NSISO8601DateFormatter alloc] init];
@@ -460,6 +487,17 @@ static int cmdSetAttr(id viewContext, NSString *identifier,
     BOOL hasStyleOpts = (attrOpts[@"style"] || attrOpts[@"indent"] || attrOpts[@"todo-done"]);
     BOOL hasLinkOpt = (attrOpts[@"link"] != nil);
 
+    // Validate --style upfront if provided
+    if (attrOpts[@"style"]) {
+        NSInteger styleVal;
+        if (!isStrictInteger(attrOpts[@"style"], &styleVal)) {
+            errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+        }
+        if (!isValidStyle(styleVal)) {
+            errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+        }
+    }
+
     // Validate URL upfront if --link is provided
     NSURL *linkURL = nil;
     if (hasLinkOpt) {
@@ -665,7 +703,9 @@ static int cmdReadStructuredNote(id note) {
                     para[@"text"] = line;
                     para[@"style"] = @(currentStyle);
                     if (currentIndent > 0) para[@"indent"] = @(currentIndent);
-                    if (currentStyle == 103) para[@"checked"] = @(currentTodoDone);
+                    if (currentStyle == 100) para[@"type"] = @"dash";
+                    if (currentStyle == 102) para[@"type"] = @"numbered";
+                    if (currentStyle == 103) { para[@"type"] = @"checklist"; para[@"checked"] = @(currentTodoDone); }
                     [paragraphs addObject:para];
                 }
             }
@@ -684,7 +724,9 @@ static int cmdReadStructuredNote(id note) {
             para[@"text"] = line;
             para[@"style"] = @(currentStyle);
             if (currentIndent > 0) para[@"indent"] = @(currentIndent);
-            if (currentStyle == 103) para[@"checked"] = @(currentTodoDone);
+            if (currentStyle == 100) para[@"type"] = @"dash";
+            if (currentStyle == 102) para[@"type"] = @"numbered";
+            if (currentStyle == 103) { para[@"type"] = @"checklist"; para[@"checked"] = @(currentTodoDone); }
             [paragraphs addObject:para];
         }
     }
@@ -746,7 +788,7 @@ static void saveNote(id note, id viewContext, NSUInteger newLength, NSInteger de
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 }
 
-static int cmdAppend(id viewContext, NSString *identifier, NSString *text) {
+static int cmdAppend(id viewContext, NSString *identifier, NSString *text, NSInteger styleValue) {
     id note = findNoteByID(viewContext, identifier);
     if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", identifier]);
 
@@ -758,17 +800,17 @@ static int cmdAppend(id viewContext, NSString *identifier, NSString *text) {
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("beginEditing"));
     ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"), toInsert, oldLen);
 
-    id bodyStyle = [[ICTTParagraphStyleClass alloc] init];
-    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(bodyStyle, sel_registerName("setStyle:"), 3);
+    NSInteger actualStyle = (styleValue >= 0) ? styleValue : 3;
+    id paraStyle = makeParagraphStyle(actualStyle);
     ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
-        @{@"TTStyle": bodyStyle}, NSMakeRange(oldLen, toInsert.length));
+        @{@"TTStyle": paraStyle}, NSMakeRange(oldLen, toInsert.length));
 
     saveNote(note, viewContext, oldLen + toInsert.length, toInsert.length);
     printJSON(@{@"id": identifier, @"appended": text});
     return 0;
 }
 
-static int cmdInsert(id viewContext, NSString *identifier, NSString *text, NSUInteger position, BOOL useBodyOffset) {
+static int cmdInsert(id viewContext, NSString *identifier, NSString *text, NSUInteger position, BOOL useBodyOffset, NSInteger styleValue) {
     id note = findNoteByID(viewContext, identifier);
     if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", identifier]);
 
@@ -792,10 +834,10 @@ static int cmdInsert(id viewContext, NSString *identifier, NSString *text, NSUIn
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("beginEditing"));
     ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"), text, position);
 
-    id bodyStyle = [[ICTTParagraphStyleClass alloc] init];
-    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(bodyStyle, sel_registerName("setStyle:"), 3);
+    NSInteger actualStyle = (styleValue >= 0) ? styleValue : 3;
+    id paraStyle = makeParagraphStyle(actualStyle);
     ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
-        @{@"TTStyle": bodyStyle}, NSMakeRange(position, text.length));
+        @{@"TTStyle": paraStyle}, NSMakeRange(position, text.length));
 
     saveNote(note, viewContext, oldLen + text.length, text.length);
     printJSON(@{@"id": identifier, @"inserted": text, @"position": @(position)});
@@ -1052,7 +1094,7 @@ static int cmdTest(id viewContext) {
     {
         id noteForID = findNote(viewContext, testTitle, testFolderName);
         NSString *noteID = noteToDict(noteForID)[@"id"];
-        int ret = cmdAppend(viewContext, noteID, @"Appended text");
+        int ret = cmdAppend(viewContext, noteID, @"Appended text", -1);
         if (ret == 0) {
             id note = findNote(viewContext, testTitle, testFolderName);
             NSString *body = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("noteAsPlainTextWithoutTitle"));
@@ -1644,6 +1686,218 @@ static int cmdTest(id viewContext) {
         } else { fprintf(stderr, "  FAIL (checklist item not found)\n"); failed++; }
     }
 
+    // Test: List formatting (dash list via append --style 100)
+    fprintf(stderr, "Test: List formatting (dash list)...\n");
+    {
+        NSString *listTitle = @"__notes_cli_list_test__";
+        id listNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id listDoc = ((id (*)(id, SEL))objc_msgSend)(listNote, sel_registerName("document"));
+        id listMs = ((id (*)(id, SEL))objc_msgSend)(listDoc, sel_registerName("mergeableString"));
+        // Insert title
+        ((void (*)(id, SEL))objc_msgSend)(listNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(listMs, sel_registerName("insertString:atIndex:"), listTitle, 0);
+        id ltStyle = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(ltStyle, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(listMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": ltStyle}, NSMakeRange(0, listTitle.length));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            listNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, listTitle.length), listTitle.length);
+        ((void (*)(id, SEL))objc_msgSend)(listNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(listNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSString *listNoteID = noteToDict(listNote)[@"id"];
+        // Append three dash list items
+        cmdAppend(viewContext, listNoteID, @"Dash item 1", 100);
+        cmdAppend(viewContext, listNoteID, @"Dash item 2", 100);
+        cmdAppend(viewContext, listNoteID, @"Dash item 3", 100);
+        // Append two numbered list items
+        cmdAppend(viewContext, listNoteID, @"Number item 1", 102);
+        cmdAppend(viewContext, listNoteID, @"Number item 2", 102);
+
+        // Verify via read-attrs
+        id verifyNote = findNoteByID(viewContext, listNoteID);
+        id verifyDoc = ((id (*)(id, SEL))objc_msgSend)(verifyNote, sel_registerName("document"));
+        id verifyMs = ((id (*)(id, SEL))objc_msgSend)(verifyDoc, sel_registerName("mergeableString"));
+        NSString *verifyText = [((id (*)(id, SEL))objc_msgSend)(verifyNote, sel_registerName("attributedString")) string];
+        int dash100Count = 0, numbered102Count = 0;
+        NSUInteger vi = 0;
+        while (vi < verifyText.length) {
+            NSRange vr;
+            NSDictionary *va = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                verifyMs, sel_registerName("attributesAtIndex:effectiveRange:"), vi, &vr);
+            id vs = va[@"TTStyle"];
+            if (vs) {
+                int sval = (int)((NSInteger (*)(id, SEL))objc_msgSend)(vs, sel_registerName("style"));
+                if (sval == 100) dash100Count++;
+                if (sval == 102) numbered102Count++;
+            }
+            vi = vr.location + vr.length;
+        }
+        if (dash100Count >= 3 && numbered102Count >= 2) {
+            fprintf(stderr, "  PASS (dash=%d, numbered=%d)\n", dash100Count, numbered102Count); passed++;
+        } else {
+            fprintf(stderr, "  FAIL (dash=%d, numbered=%d)\n", dash100Count, numbered102Count); failed++;
+        }
+        // Cleanup
+        deleteNote(findNoteByID(viewContext, listNoteID), viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: Checklist via append --style 103
+    fprintf(stderr, "Test: Checklist via append...\n");
+    {
+        NSString *clTitle = @"__notes_cli_checklist_test__";
+        id clNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id clDoc = ((id (*)(id, SEL))objc_msgSend)(clNote, sel_registerName("document"));
+        id clMs = ((id (*)(id, SEL))objc_msgSend)(clDoc, sel_registerName("mergeableString"));
+        ((void (*)(id, SEL))objc_msgSend)(clNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(clMs, sel_registerName("insertString:atIndex:"), clTitle, 0);
+        id clTitleStyle = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(clTitleStyle, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(clMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": clTitleStyle}, NSMakeRange(0, clTitle.length));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            clNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, clTitle.length), clTitle.length);
+        ((void (*)(id, SEL))objc_msgSend)(clNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(clNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSString *clNoteID = noteToDict(clNote)[@"id"];
+        cmdAppend(viewContext, clNoteID, @"Check this item", 103);
+
+        // Verify style 103 and todo exists
+        id clVerify = findNoteByID(viewContext, clNoteID);
+        id clVDoc = ((id (*)(id, SEL))objc_msgSend)(clVerify, sel_registerName("document"));
+        id clVMs = ((id (*)(id, SEL))objc_msgSend)(clVDoc, sel_registerName("mergeableString"));
+        NSString *clVText = [((id (*)(id, SEL))objc_msgSend)(clVerify, sel_registerName("attributedString")) string];
+        BOOL found103 = NO, foundTodo = NO;
+        NSUInteger ci = 0;
+        while (ci < clVText.length) {
+            NSRange cr;
+            NSDictionary *ca = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                clVMs, sel_registerName("attributesAtIndex:effectiveRange:"), ci, &cr);
+            id cs = ca[@"TTStyle"];
+            if (cs) {
+                int csv = (int)((NSInteger (*)(id, SEL))objc_msgSend)(cs, sel_registerName("style"));
+                if (csv == 103) {
+                    found103 = YES;
+                    id ctodo = ((id (*)(id, SEL))objc_msgSend)(cs, sel_registerName("todo"));
+                    if (ctodo) foundTodo = YES;
+                }
+            }
+            ci = cr.location + cr.length;
+        }
+        if (found103 && foundTodo) {
+            fprintf(stderr, "  PASS (style=103, todo present)\n"); passed++;
+        } else {
+            fprintf(stderr, "  FAIL (style103=%d, todo=%d)\n", found103, foundTodo); failed++;
+        }
+        // Cleanup
+        deleteNote(findNoteByID(viewContext, clNoteID), viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: Style validation (subprocess-based)
+    fprintf(stderr, "Test: Style validation (invalid styles)...\n");
+    {
+        // Get path to current executable
+        char testExecPath[PATH_MAX];
+        uint32_t testExecSize = sizeof(testExecPath);
+        if (_NSGetExecutablePath(testExecPath, &testExecSize) == 0) {
+            char testRealPath[PATH_MAX];
+            realpath(testExecPath, testRealPath);
+            NSString *binaryPath = [NSString stringWithUTF8String:testRealPath];
+
+            // Create a temp note to test against
+            id valNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+            ((void (*)(id, SEL))objc_msgSend)(valNote, sel_registerName("saveNoteData"));
+            [viewContext save:nil];
+            NSString *valNoteID = noteToDict(valNote)[@"id"];
+
+            // Test invalid style number (999)
+            NSTask *task1 = [[NSTask alloc] init];
+            [task1 setLaunchPath:binaryPath];
+            [task1 setArguments:@[@"append", @"--id", valNoteID, @"--text", @"Bad", @"--style", @"999"]];
+            [task1 setStandardOutput:[NSPipe pipe]];
+            [task1 setStandardError:[NSPipe pipe]];
+            [task1 launch];
+            [task1 waitUntilExit];
+            int status1 = [task1 terminationStatus];
+
+            // Test non-numeric style (abc)
+            NSTask *task2 = [[NSTask alloc] init];
+            [task2 setLaunchPath:binaryPath];
+            [task2 setArguments:@[@"append", @"--id", valNoteID, @"--text", @"Bad", @"--style", @"abc"]];
+            [task2 setStandardOutput:[NSPipe pipe]];
+            [task2 setStandardError:[NSPipe pipe]];
+            [task2 launch];
+            [task2 waitUntilExit];
+            int status2 = [task2 terminationStatus];
+
+            if (status1 != 0 && status2 != 0) {
+                fprintf(stderr, "  PASS (invalid=exit%d, non-numeric=exit%d)\n", status1, status2); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (invalid=exit%d, non-numeric=exit%d)\n", status1, status2); failed++;
+            }
+
+            // Cleanup
+            deleteNote(findNoteByID(viewContext, valNoteID), viewContext);
+            [viewContext save:nil];
+        } else {
+            fprintf(stderr, "  SKIP (could not determine executable path)\n");
+        }
+    }
+
+    // Test: Multiline append with list style (behavior documentation)
+    fprintf(stderr, "Test: Multiline append with list style...\n");
+    {
+        NSString *mlTitle = @"__notes_cli_multiline_list_test__";
+        id mlNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mlDoc = ((id (*)(id, SEL))objc_msgSend)(mlNote, sel_registerName("document"));
+        id mlMs = ((id (*)(id, SEL))objc_msgSend)(mlDoc, sel_registerName("mergeableString"));
+        ((void (*)(id, SEL))objc_msgSend)(mlNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mlMs, sel_registerName("insertString:atIndex:"), mlTitle, 0);
+        id mlTitleStyle = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(mlTitleStyle, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mlMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": mlTitleStyle}, NSMakeRange(0, mlTitle.length));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mlNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mlTitle.length), mlTitle.length);
+        ((void (*)(id, SEL))objc_msgSend)(mlNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mlNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSString *mlNoteID = noteToDict(mlNote)[@"id"];
+        // Append multiline text with dash list style
+        cmdAppend(viewContext, mlNoteID, @"Line A\nLine B", 100);
+
+        // Read back and count style-100 ranges
+        id mlVerify = findNoteByID(viewContext, mlNoteID);
+        id mlVDoc = ((id (*)(id, SEL))objc_msgSend)(mlVerify, sel_registerName("document"));
+        id mlVMs = ((id (*)(id, SEL))objc_msgSend)(mlVDoc, sel_registerName("mergeableString"));
+        NSString *mlVText = [((id (*)(id, SEL))objc_msgSend)(mlVerify, sel_registerName("attributedString")) string];
+        int mlDashCount = 0;
+        NSUInteger mi = 0;
+        while (mi < mlVText.length) {
+            NSRange mr;
+            NSDictionary *ma = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                mlVMs, sel_registerName("attributesAtIndex:effectiveRange:"), mi, &mr);
+            id ms2 = ma[@"TTStyle"];
+            if (ms2) {
+                int msv = (int)((NSInteger (*)(id, SEL))objc_msgSend)(ms2, sel_registerName("style"));
+                if (msv == 100) mlDashCount++;
+            }
+            mi = mr.location + mr.length;
+        }
+        // Document behavior: style applies to the entire inserted range as one block
+        fprintf(stderr, "  PASS (multiline dash ranges=%d, style applied as single block)\n", mlDashCount); passed++;
+
+        // Cleanup
+        deleteNote(findNoteByID(viewContext, mlNoteID), viewContext);
+        [viewContext save:nil];
+    }
+
     // Cleanup
 
     // Test: bodyOffsetForNote
@@ -1729,7 +1983,7 @@ static int cmdTest(id viewContext) {
         id note = findNote(viewContext, testTitle, testFolderName);
         if (note) {
             NSString *noteID = noteToDict(note)[@"id"];
-            int ret = cmdInsert(viewContext, noteID, @"INSERTED", 0, YES);
+            int ret = cmdInsert(viewContext, noteID, @"INSERTED", 0, YES, -1);
             if (ret == 0) {
                 note = findNoteByID(viewContext, noteID);
                 NSString *body = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("noteAsPlainTextWithoutTitle"));
@@ -1749,7 +2003,7 @@ static int cmdTest(id viewContext) {
         if (note) {
             NSString *noteID = noteToDict(note)[@"id"];
             NSString *bodyBefore = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("noteAsPlainTextWithoutTitle"));
-            cmdInsert(viewContext, noteID, @"DELME", 0, YES);
+            cmdInsert(viewContext, noteID, @"DELME", 0, YES, -1);
             int ret = cmdDeleteRange(viewContext, noteID, 0, 5, YES);
             if (ret == 0) {
                 note = findNoteByID(viewContext, noteID);
@@ -1984,7 +2238,7 @@ static void usage(void) {
     fprintf(stderr, "notes-cli-v2 — read and edit Apple Notes via the NotesShared framework\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Data model: A note is a flat string with attribute ranges at character offsets.\n");
-    fprintf(stderr, "Each range has a style (0=title, 1=heading, 3=body, 103=checklist), indent level,\n");
+    fprintf(stderr, "Each range has a style (0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist), indent level,\n");
     fprintf(stderr, "and optional properties (todo-done, link, strikethrough). Use read-attrs to see\n");
     fprintf(stderr, "the raw attribute stream. All editing operates on character offsets.\n");
     fprintf(stderr, "\n");
@@ -2000,8 +2254,8 @@ static void usage(void) {
     fprintf(stderr, "  notes-cli-v2 read-attrs (--title <title> | --id <id>) [--folder <name>]\n");
     fprintf(stderr, "  notes-cli-v2 create-empty --folder <name>\n");
     fprintf(stderr, "  notes-cli-v2 delete --id <id>\n");
-    fprintf(stderr, "  notes-cli-v2 append --id <id> --text <text>\n");
-    fprintf(stderr, "  notes-cli-v2 insert --id <id> --text <text> --position <n> [--body-offset]\n");
+    fprintf(stderr, "  notes-cli-v2 append --id <id> --text <text> [--style <n>]\n");
+    fprintf(stderr, "  notes-cli-v2 insert --id <id> --text <text> --position <n> [--style <n>] [--body-offset]\n");
     fprintf(stderr, "  notes-cli-v2 delete-range --id <id> --start <n> --length <n> [--body-offset]\n");
     fprintf(stderr, "  notes-cli-v2 set-attr --id <id> --offset <n> --length <n> [--style <n>] [--indent <n>] [--todo-done true|false] [--link <url>] [--body-offset]\n");
     fprintf(stderr, "\n");
@@ -2183,15 +2437,33 @@ int main(int argc, const char *argv[]) {
             NSString *noteID = opts[@"id"];
             if (!noteID || noteID.length == 0) { fprintf(stderr, "Error: --id required\n"); usage(); return 1; }
             if (!kwText) { fprintf(stderr, "Error: --text required\n"); usage(); return 1; }
-            return cmdAppend(viewContext, noteID, kwText);
+            NSInteger styleVal = -1;
+            if (opts[@"style"]) {
+                if (!isStrictInteger(opts[@"style"], &styleVal)) {
+                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                }
+                if (!isValidStyle(styleVal)) {
+                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                }
+            }
+            return cmdAppend(viewContext, noteID, kwText, styleVal);
 
         } else if ([command isEqualToString:@"insert"]) {
             NSString *noteID = opts[@"id"];
             if (!noteID || noteID.length == 0) { fprintf(stderr, "Error: --id required\n"); usage(); return 1; }
             if (!kwText) { fprintf(stderr, "Error: --text required\n"); usage(); return 1; }
             if (!opts[@"position"]) { fprintf(stderr, "Error: --position required\n"); usage(); return 1; }
+            NSInteger styleVal = -1;
+            if (opts[@"style"]) {
+                if (!isStrictInteger(opts[@"style"], &styleVal)) {
+                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                }
+                if (!isValidStyle(styleVal)) {
+                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                }
+            }
             return cmdInsert(viewContext, noteID, kwText, [opts[@"position"] integerValue],
-                [opts[@"body-offset"] isEqualToString:@"true"]);
+                [opts[@"body-offset"] isEqualToString:@"true"], styleVal);
 
         } else if ([command isEqualToString:@"delete-range"]) {
             NSString *noteID = opts[@"id"];

@@ -1458,8 +1458,9 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
                 // Apply link wrapping
                 if (run[@"link"]) {
                     NSString *linkURL = run[@"link"];
-                    // If display text equals URL, output bare URL
-                    if ([runText isEqualToString:linkURL]) {
+                    // If display text equals URL (before escaping), output bare URL
+                    if ([runText isEqualToString:linkURL] ||
+                        [unescapeMarkdown(escaped) isEqualToString:linkURL]) {
                         escaped = linkURL;
                     } else {
                         escaped = [NSString stringWithFormat:@"[%@](%@)", escaped, linkURL];
@@ -1674,11 +1675,11 @@ static void parseInlineFormatting(NSString *lineText, NSMutableString *outPlainT
                     }
                     urlEnd++;
                 }
-                // Strip trailing punctuation that's likely not part of the URL
+                // Strip trailing punctuation and escapes that are likely not part of the URL
                 while (urlEnd > i + scheme.length) {
                     unichar last = [lineText characterAtIndex:urlEnd - 1];
                     if (last == '.' || last == ',' || last == ';' || last == ':' ||
-                        last == '!' || last == '?') {
+                        last == '!' || last == '?' || last == '\\') {
                         urlEnd--;
                     } else {
                         break;

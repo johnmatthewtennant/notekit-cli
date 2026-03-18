@@ -2274,8 +2274,23 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
                         if (runStart + runLen > paraLen) continue;
                         NSMutableDictionary *runAttrs = [patchedAttrs mutableCopy];
                         if (run[@"link"]) {
-                            NSURL *linkURL = [NSURL URLWithString:run[@"link"]];
-                            if (linkURL) runAttrs[@"NSLink"] = linkURL;
+                            NSURL *rawURL = [NSURL URLWithString:run[@"link"]];
+                            if (rawURL && [[rawURL scheme] isEqualToString:@"applenotes"]) {
+                                NSString *targetId = nil;
+                                for (NSURLQueryItem *qi in [[NSURLComponents componentsWithURL:rawURL resolvingAgainstBaseURL:NO] queryItems]) {
+                                    if ([qi.name isEqualToString:@"identifier"]) { targetId = qi.value; break; }
+                                }
+                                if (targetId) {
+                                    id targetNote = findNoteByID(viewContext, targetId);
+                                    if (targetNote) {
+                                        Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities");
+                                        NSURL *nativeURL = ICAppURLUtilities ? ((id (*)(id, SEL, id))objc_msgSend)(ICAppURLUtilities, sel_registerName("appURLForNote:"), targetNote) : nil;
+                                        if (nativeURL) runAttrs[@"NSLink"] = nativeURL;
+                                    }
+                                }
+                            } else if (rawURL) {
+                                runAttrs[@"NSLink"] = rawURL;
+                            }
                         }
                         if ([run[@"strikethrough"] boolValue]) runAttrs[@"TTStrikethrough"] = @1;
                         ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
@@ -2320,8 +2335,23 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
                     if (runStart + runLen > newText.length) continue;
                     NSMutableDictionary *runAttrs = [attrs mutableCopy];
                     if (run[@"link"]) {
-                        NSURL *linkURL = [NSURL URLWithString:run[@"link"]];
-                        if (linkURL) runAttrs[@"NSLink"] = linkURL;
+                        NSURL *rawURL = [NSURL URLWithString:run[@"link"]];
+                        if (rawURL && [[rawURL scheme] isEqualToString:@"applenotes"]) {
+                            NSString *targetId = nil;
+                            for (NSURLQueryItem *qi in [[NSURLComponents componentsWithURL:rawURL resolvingAgainstBaseURL:NO] queryItems]) {
+                                if ([qi.name isEqualToString:@"identifier"]) { targetId = qi.value; break; }
+                            }
+                            if (targetId) {
+                                id targetNote = findNoteByID(viewContext, targetId);
+                                if (targetNote) {
+                                    Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities");
+                                    NSURL *nativeURL = ICAppURLUtilities ? ((id (*)(id, SEL, id))objc_msgSend)(ICAppURLUtilities, sel_registerName("appURLForNote:"), targetNote) : nil;
+                                    if (nativeURL) runAttrs[@"NSLink"] = nativeURL;
+                                }
+                            }
+                        } else if (rawURL) {
+                            runAttrs[@"NSLink"] = rawURL;
+                        }
                     }
                     if ([run[@"strikethrough"] boolValue]) runAttrs[@"TTStrikethrough"] = @1;
                     ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),

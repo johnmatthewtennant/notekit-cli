@@ -1361,16 +1361,30 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
         NSArray *runs = para[@"runs"];
         if (runs && runs.count > 0) {
             NSMutableString *fmt = [NSMutableString string];
+            NSUInteger cursor = 0;  // Track position in rawText to fill gaps between runs
             for (NSDictionary *run in runs) {
                 NSUInteger start = [run[@"start"] unsignedIntegerValue];
                 NSUInteger len = [run[@"length"] unsignedIntegerValue];
                 // Clamp to rawText bounds
                 if (start >= rawText.length) continue;
                 if (start + len > rawText.length) len = rawText.length - start;
+
+                // Fill gap between previous run and this one
+                if (start > cursor && cursor < rawText.length) {
+                    NSUInteger gapLen = MIN(start - cursor, rawText.length - cursor);
+                    NSString *gap = [rawText substringWithRange:NSMakeRange(cursor, gapLen)];
+                    gap = [gap stringByTrimmingCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+                    if (gap.length > 0) [fmt appendString:escapeMarkdown(gap)];
+                }
+
                 NSString *runText = [rawText substringWithRange:NSMakeRange(start, len)];
-                // Strip trailing newlines from run text
-                runText = [runText stringByTrimmingCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-                if (runText.length == 0) continue;
+                // Replace U+2028 (line separator) with space — Apple Notes uses this for soft breaks
+                runText = [runText stringByReplacingOccurrencesOfString:@"\u2028" withString:@" "];
+                // Strip trailing hard newlines from run text
+                while (runText.length > 0 && [runText characterAtIndex:runText.length - 1] == '\n') {
+                    runText = [runText substringToIndex:runText.length - 1];
+                }
+                if (runText.length == 0) { cursor = start + len; continue; }
 
                 NSString *escaped = escapeMarkdown(runText);
 
@@ -1390,6 +1404,13 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
                 }
 
                 [fmt appendString:escaped];
+                cursor = start + len;
+            }
+            // Fill trailing text after last run
+            if (cursor < rawText.length) {
+                NSString *trailing = [rawText substringFromIndex:cursor];
+                trailing = [trailing stringByTrimmingCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+                if (trailing.length > 0) [fmt appendString:escapeMarkdown(trailing)];
             }
             formattedText = fmt;
         } else {

@@ -312,7 +312,6 @@ static int cmdRead(id viewContext, NSString *title, NSString *folderName) {
 }
 
 static int cmdReadAttrsNote(id note) {
-
     id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
     id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
     NSAttributedString *attrStr = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attributedString"));
@@ -1249,6 +1248,7 @@ static void emitParagraph(NSMutableArray *paragraphs, NSString *text, NSArray *r
                 lineRun[@"start"] = @(overlapStart - lineStart);
                 lineRun[@"length"] = @(overlapEnd - overlapStart);
                 if (run[@"link"]) lineRun[@"link"] = run[@"link"];
+                if (run[@"noteLinkDisplayText"]) lineRun[@"noteLinkDisplayText"] = run[@"noteLinkDisplayText"];
                 if ([run[@"strikethrough"] boolValue]) lineRun[@"strikethrough"] = @YES;
                 [lineRuns addObject:lineRun];
             }
@@ -1269,6 +1269,46 @@ static NSArray *noteToParaModel(id note) {
     NSUInteger length = fullText.length;
 
     if (length == 0) return @[];
+
+    // Build lookup of note-to-note link attachments by text offset
+    // ICInlineAttachment objects with typeUTI = com.apple.notes.inlinetextattachment.link
+    // Key: text offset (NSNumber), Value: @{@"displayText": ..., @"url": ...}
+    NSMutableDictionary *noteLinksByOffset = [NSMutableDictionary dictionary];
+    id inlineAtts = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("inlineAttachments"));
+    if (inlineAtts) {
+        id viewContext = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("managedObjectContext"));
+        for (id att in inlineAtts) {
+            NSString *typeUTI = [att respondsToSelector:sel_registerName("typeUTI")] ?
+                ((id (*)(id, SEL))objc_msgSend)(att, sel_registerName("typeUTI")) : nil;
+            if (![typeUTI isEqualToString:@"com.apple.notes.inlinetextattachment.link"]) continue;
+            NSString *displayText = [att respondsToSelector:sel_registerName("displayText")] ?
+                ((id (*)(id, SEL))objc_msgSend)(att, sel_registerName("displayText")) : nil;
+            if (!displayText || displayText.length == 0) continue;
+            // Get offset from rangeInNote
+            NSRange rng = {0, 0};
+            if ([att respondsToSelector:sel_registerName("rangeInNote")]) {
+                rng = ((NSRange (*)(id, SEL))objc_msgSend)(att, sel_registerName("rangeInNote"));
+            }
+            if (rng.length == 0) continue;
+            // Search for the target note by title
+            NSString *linkURL = nil;
+            if (viewContext) {
+                NSFetchRequest *req = [[NSFetchRequest alloc] initWithEntityName:@"ICNote"];
+                req.predicate = [NSPredicate predicateWithFormat:@"title == %@", displayText];
+                req.fetchLimit = 1;
+                NSArray *results = [viewContext executeFetchRequest:req error:nil];
+                if (results.count > 0) {
+                    NSString *targetId = ((id (*)(id, SEL))objc_msgSend)(results[0], sel_registerName("identifier"));
+                    if (targetId) {
+                        linkURL = [NSString stringWithFormat:@"applenotes://showNote?identifier=%@", targetId];
+                    }
+                }
+            }
+            if (linkURL) {
+                noteLinksByOffset[@(rng.location)] = @{@"displayText": displayText, @"url": linkURL};
+            }
+        }
+    }
 
     NSMutableArray *paragraphs = [NSMutableArray array];
     NSMutableString *currentText = [NSMutableString string];
@@ -1299,6 +1339,15 @@ static NSArray *noteToParaModel(id note) {
             run[@"length"] = @(chunk.length);
             id nsLink = attrs[@"NSLink"];
             if (nsLink) run[@"link"] = [nsLink description];
+            // Check for note-to-note link attachment (￼ chars with NSAttachment)
+            id nsAttachment = attrs[@"NSAttachment"];
+            if (nsAttachment && !nsLink && [chunk isEqualToString:@"\uFFFC"]) {
+                NSDictionary *noteLink = noteLinksByOffset[@(effectiveRange.location)];
+                if (noteLink) {
+                    run[@"link"] = noteLink[@"url"];
+                    run[@"noteLinkDisplayText"] = noteLink[@"displayText"];
+                }
+            }
             id strikethrough = attrs[@"TTStrikethrough"];
             if (strikethrough) run[@"strikethrough"] = @YES;
             [currentRuns addObject:run];
@@ -1323,6 +1372,15 @@ static NSArray *noteToParaModel(id note) {
             run[@"length"] = @(chunk.length);
             id nsLink = attrs[@"NSLink"];
             if (nsLink) run[@"link"] = [nsLink description];
+            // Check for note-to-note link attachment (￼ chars with NSAttachment)
+            id nsAttachment = attrs[@"NSAttachment"];
+            if (nsAttachment && !nsLink && [chunk isEqualToString:@"\uFFFC"]) {
+                NSDictionary *noteLink = noteLinksByOffset[@(effectiveRange.location)];
+                if (noteLink) {
+                    run[@"link"] = noteLink[@"url"];
+                    run[@"noteLinkDisplayText"] = noteLink[@"displayText"];
+                }
+            }
             id strikethrough = attrs[@"TTStrikethrough"];
             if (strikethrough) run[@"strikethrough"] = @YES;
             [currentRuns addObject:run];
@@ -1378,6 +1436,12 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
                 }
 
                 NSString *runText = [rawText substringWithRange:NSMakeRange(start, len)];
+
+                // For note-to-note links, replace ￼ with the display text
+                if (run[@"noteLinkDisplayText"]) {
+                    runText = run[@"noteLinkDisplayText"];
+                }
+
                 // Replace U+2028 (line separator) with space — Apple Notes uses this for soft breaks
                 runText = [runText stringByReplacingOccurrencesOfString:@"\u2028" withString:@" "];
                 // Strip trailing hard newlines from run text

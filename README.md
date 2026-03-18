@@ -6,7 +6,7 @@ CLI for Apple Notes via the private NotesShared framework. Full control over sty
 
 ```bash
 brew install johnmatthewtennant/tap/notekit-cli
-curl -sL https://raw.githubusercontent.com/johnmatthewtennant/notekit-cli/master/.agents/skills/apple-notes/SKILL.md -o ~/.claude/skills/apple-notes/SKILL.md --create-dirs
+notekit install-skill
 ```
 
 ## Claude Code
@@ -17,18 +17,38 @@ curl -sL https://raw.githubusercontent.com/johnmatthewtennant/notekit-cli/master
 
 ## CLI
 
+Primitive commands give you full control. Convenience commands compose multiple primitives for common operations.
+
 ```
-notekit folders
-notekit list [--folder <name>]
-notekit get (<title> | --title <title>) [--folder <name>]
-notekit read (<title> | --title <title>) [--folder <name>]
-notekit read-attrs (<title> | --title <title>) [--folder <name>]
-notekit append (<title> | --title <title>) (<text> | --text <text>) [--folder <name>]
-notekit insert (<title> | --title <title>) (<text> | --text <text>) --position <n> [--folder <name>]
-notekit delete-range (<title> | --title <title>) --start <n> --length <n> [--folder <name>]
-notekit set-attr (<title> | --title <title>) --offset <n> --length <n> [--style <n>] [--indent <n>] [--link <url>]
-notekit search (<query> | --query <query>) [--folder <name>]
-notekit help                               # full usage
+Primitives:
+  notekit folders
+  notekit list [--folder <name>] [--limit <n>]
+  notekit get (--title <title> | --id <id>) [--folder <name>]
+  notekit read (--title <title> | --id <id>) [--folder <name>]
+  notekit read-attrs (--title <title> | --id <id>) [--folder <name>]
+  notekit create-empty --folder <name>
+  notekit delete --id <id>
+  notekit append --id <id> --text <text> [--style <n>]
+  notekit insert --id <id> --text <text> --position <n> [--style <n>] [--body-offset]
+  notekit delete-range --id <id> --start <n> --length <n> [--body-offset]
+  notekit set-attr --id <id> --offset <n> --length <n> [--style <n>] [--indent <n>] [--todo-done true|false] [--link <url>] [--body-offset]
+  notekit move --id <id> --to <to-folder>
+  notekit create-folder --name <name>
+  notekit delete-folder --name <name>
+  notekit search --query <query> [--folder <name>]
+  notekit pin --id <id>
+  notekit unpin --id <id>
+  notekit get-link --id <id>
+
+Convenience (composed from primitives):
+  notekit replace --id <id> --search <text> --replacement <text>
+  notekit read-structured (--title <title> | --id <id>) [--folder <name>]
+  notekit read-markdown (--title <title> | --id <id>) [--folder <name>]
+  notekit write-markdown --id <id> [--dry-run] [--backup]
+  notekit duplicate --id <id> [--new-title <new-title>]
+  notekit delete-line --id <id> --search-text <search-text>
+  notekit add-link --id <id> --target <id> [--text <text>] [--position <n>]
+  notekit --help                               # full usage
 ```
 
 ## Private API Notice

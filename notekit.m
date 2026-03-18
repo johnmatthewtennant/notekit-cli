@@ -4415,7 +4415,7 @@ static int cmdInstallSkill(BOOL installClaude, BOOL installAgents, BOOL force) {
 // --- Usage ---
 
 static void usage(void) {
-    fprintf(stderr, "notes-cli-v2 — read and edit Apple Notes via the NotesShared framework\n");
+    fprintf(stderr, "notekit — read and edit Apple Notes via the NotesShared framework\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Data model: A note is a flat string with attribute ranges at character offsets.\n");
     fprintf(stderr, "Each range has a style (0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist), indent level,\n");
@@ -4426,24 +4426,24 @@ static void usage(void) {
     fprintf(stderr, "  These give you full control over notes. You can do anything with read-attrs,\n");
     fprintf(stderr, "  set-attr, insert, and delete-range.\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "  notes-cli-v2 folders\n");
-    fprintf(stderr, "  notes-cli-v2 list [--folder <name>] [--limit <n>]\n");
-    fprintf(stderr, "  notes-cli-v2 get (--title <title> | --id <id>) [--folder <name>]\n");
-    fprintf(stderr, "  notes-cli-v2 read (--title <title> | --id <id>) [--folder <name>]\n");
-    fprintf(stderr, "  notes-cli-v2 read-attrs (--title <title> | --id <id>) [--folder <name>]\n");
-    fprintf(stderr, "  notes-cli-v2 create-empty --folder <name>\n");
-    fprintf(stderr, "  notes-cli-v2 delete --id <id>\n");
-    fprintf(stderr, "  notes-cli-v2 append --id <id> --text <text> [--style <n>]\n");
-    fprintf(stderr, "  notes-cli-v2 insert --id <id> --text <text> --position <n> [--style <n>] [--body-offset]\n");
-    fprintf(stderr, "  notes-cli-v2 delete-range --id <id> --start <n> --length <n> [--body-offset]\n");
-    fprintf(stderr, "  notes-cli-v2 set-attr --id <id> --offset <n> --length <n> [--style <n>] [--indent <n>] [--todo-done true|false] [--link <url>] [--body-offset]\n");
-    fprintf(stderr, "  notes-cli-v2 move --id <id> --to <to-folder>\n");
-    fprintf(stderr, "  notes-cli-v2 create-folder --name <name>\n");
-    fprintf(stderr, "  notes-cli-v2 delete-folder --name <name>\n");
-    fprintf(stderr, "  notes-cli-v2 search --query <query> [--folder <name>]\n");
-    fprintf(stderr, "  notes-cli-v2 pin --id <id>\n");
-    fprintf(stderr, "  notes-cli-v2 unpin --id <id>\n");
-    fprintf(stderr, "  notes-cli-v2 get-link --id <id>                     Get applenotes:// URL for note-to-note linking\n");
+    fprintf(stderr, "  notekit folders\n");
+    fprintf(stderr, "  notekit list [--folder <name>] [--limit <n>]\n");
+    fprintf(stderr, "  notekit get (--title <title> | --id <id>) [--folder <name>]\n");
+    fprintf(stderr, "  notekit read (--title <title> | --id <id>) [--folder <name>]\n");
+    fprintf(stderr, "  notekit read-attrs (--title <title> | --id <id>) [--folder <name>]\n");
+    fprintf(stderr, "  notekit create-empty --folder <name>\n");
+    fprintf(stderr, "  notekit delete --id <id>\n");
+    fprintf(stderr, "  notekit append --id <id> --text <text> [--style <n>]\n");
+    fprintf(stderr, "  notekit insert --id <id> --text <text> --position <n> [--style <n>] [--body-offset]\n");
+    fprintf(stderr, "  notekit delete-range --id <id> --start <n> --length <n> [--body-offset]\n");
+    fprintf(stderr, "  notekit set-attr --id <id> --offset <n> --length <n> [--style <n>] [--indent <n>] [--todo-done true|false] [--link <url>] [--body-offset]\n");
+    fprintf(stderr, "  notekit move --id <id> --to <to-folder>\n");
+    fprintf(stderr, "  notekit create-folder --name <name>\n");
+    fprintf(stderr, "  notekit delete-folder --name <name>\n");
+    fprintf(stderr, "  notekit search --query <query> [--folder <name>]\n");
+    fprintf(stderr, "  notekit pin --id <id>\n");
+    fprintf(stderr, "  notekit unpin --id <id>\n");
+    fprintf(stderr, "  notekit get-link --id <id>                     Get applenotes:// URL for note-to-note linking\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "  --body-offset    Treat offset/position/start as relative to body text (after title).\n");
     fprintf(stderr, "                   Use this when offsets come from 'notekit read' output.\n");
@@ -4455,19 +4455,19 @@ static void usage(void) {
     fprintf(stderr, "  These compose multiple primitives for common operations. Everything they do\n");
     fprintf(stderr, "  can be accomplished with the primitive commands above.\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "  notes-cli-v2 replace --id <id> --search <text> --replacement <text>\n");
-    fprintf(stderr, "  notes-cli-v2 read-structured (--title <title> | --id <id>) [--folder <name>]\n");
-    fprintf(stderr, "  notes-cli-v2 read-markdown (--title <title> | --id <id>) [--folder <name>]\n");
-    fprintf(stderr, "  notes-cli-v2 write-markdown --id <id> [--dry-run] [--backup]            Read markdown from stdin, diff-update note\n");
-    fprintf(stderr, "  notes-cli-v2 duplicate --id <id> [--new-title <new-title>]\n");
-    fprintf(stderr, "  notes-cli-v2 delete-line --id <id> --search-text <search-text>\n");
-    fprintf(stderr, "  notes-cli-v2 add-link --id <id> --target <id> [--text <text>] [--position <n>]   Insert note-to-note link\n");
+    fprintf(stderr, "  notekit replace --id <id> --search <text> --replacement <text>\n");
+    fprintf(stderr, "  notekit read-structured (--title <title> | --id <id>) [--folder <name>]\n");
+    fprintf(stderr, "  notekit read-markdown (--title <title> | --id <id>) [--folder <name>]\n");
+    fprintf(stderr, "  notekit write-markdown --id <id> [--dry-run] [--backup]            Read markdown from stdin, diff-update note\n");
+    fprintf(stderr, "  notekit duplicate --id <id> [--new-title <new-title>]\n");
+    fprintf(stderr, "  notekit delete-line --id <id> --search-text <search-text>\n");
+    fprintf(stderr, "  notekit add-link --id <id> --target <id> [--text <text>] [--position <n>]   Insert note-to-note link\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Skill management:\n");
-    fprintf(stderr, "  notes-cli-v2 install-skill [--claude] [--agents] [--force]\n");
+    fprintf(stderr, "  notekit install-skill [--claude] [--agents] [--force]\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Testing:\n");
-    fprintf(stderr, "  notes-cli-v2 test\n");
+    fprintf(stderr, "  notekit test\n");
 }
 
 

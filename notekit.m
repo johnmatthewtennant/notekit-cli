@@ -4906,6 +4906,433 @@ static int cmdTest(id viewContext) {
         } else { fprintf(stderr, "  FAIL (popen failed)\n"); failed++; }
     }
 
+    // --- Round-trip fidelity tests ---
+
+    // Test: Structured round-trip (markdown read → write → read)
+    fprintf(stderr, "Test: Structured round-trip...\n");
+    {
+        // 1. Create a rich test note with many content types
+        NSString *rtTitle = @"__rt_roundtrip_test__";
+        id rtNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id rtDoc = ((id (*)(id, SEL))objc_msgSend)(rtNote, sel_registerName("document"));
+        id rtMs = ((id (*)(id, SEL))objc_msgSend)(rtDoc, sel_registerName("mergeableString"));
+
+        // Build content: title\nheading\nbody with URL\ndash\n  indented dash\nnumbered\nunchecked\nchecked
+        NSString *rtContent = [NSString stringWithFormat:@"%@\nA Heading\nBody text https://example.com here\nDash item\nIndented dash\nNumbered item\nUnchecked todo\nChecked todo", rtTitle];
+        ((void (*)(id, SEL))objc_msgSend)(rtNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(rtMs, sel_registerName("insertString:atIndex:"), rtContent, 0);
+
+        // Apply styles to each paragraph
+        NSUInteger off = 0;
+
+        // Title (style 0)
+        {
+            id s = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s, sel_registerName("setStyle:"), 0);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(rtMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": s}, NSMakeRange(off, rtTitle.length + 1));
+            off += rtTitle.length + 1;
+        }
+
+        // Heading (style 1)
+        {
+            NSString *headingText = @"A Heading";
+            id s = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s, sel_registerName("setStyle:"), 1);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(rtMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": s}, NSMakeRange(off, headingText.length + 1));
+            off += headingText.length + 1;
+        }
+
+        // Body text with URL link (style 3)
+        {
+            NSString *bodyPrefix = @"Body text ";
+            NSString *urlStr = @"https://example.com";
+            NSString *bodySuffix = @" here";
+            NSUInteger bodyLen = bodyPrefix.length + urlStr.length + bodySuffix.length + 1; // +1 for \n
+            id s = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s, sel_registerName("setStyle:"), 3);
+            // Apply body style to whole paragraph
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(rtMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": s}, NSMakeRange(off, bodyLen));
+            // Apply URL link to the URL portion
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(rtMs, sel_registerName("setAttributes:range:"),
+                (@{@"TTStyle": s, @"NSLink": [NSURL URLWithString:urlStr]}),
+                NSMakeRange(off + bodyPrefix.length, urlStr.length));
+            off += bodyLen;
+        }
+
+        // Dash item (style 100)
+        {
+            NSString *dashText = @"Dash item";
+            id s = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s, sel_registerName("setStyle:"), 100);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(rtMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": s}, NSMakeRange(off, dashText.length + 1));
+            off += dashText.length + 1;
+        }
+
+        // Indented dash item (style 100, indent 1)
+        {
+            NSString *indentDashText = @"Indented dash";
+            id s = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s, sel_registerName("setStyle:"), 100);
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s, sel_registerName("setIndent:"), 1);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(rtMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": s}, NSMakeRange(off, indentDashText.length + 1));
+            off += indentDashText.length + 1;
+        }
+
+        // Numbered item (style 102)
+        {
+            NSString *numText = @"Numbered item";
+            id s = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s, sel_registerName("setStyle:"), 102);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(rtMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": s}, NSMakeRange(off, numText.length + 1));
+            off += numText.length + 1;
+        }
+
+        // Unchecked checklist (style 103, done=NO)
+        {
+            NSString *unchkText = @"Unchecked todo";
+            id s = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s, sel_registerName("setStyle:"), 103);
+            id todo = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
+                [ICTTTodoClass alloc], sel_registerName("initWithIdentifier:done:"), [NSUUID UUID], NO);
+            ((void (*)(id, SEL, id))objc_msgSend)(s, sel_registerName("setTodo:"), todo);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(rtMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": s}, NSMakeRange(off, unchkText.length + 1));
+            off += unchkText.length + 1;
+        }
+
+        // Checked checklist (style 103, done=YES)
+        {
+            NSString *chkText = @"Checked todo";
+            id s = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s, sel_registerName("setStyle:"), 103);
+            id todo = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
+                [ICTTTodoClass alloc], sel_registerName("initWithIdentifier:done:"), [NSUUID UUID], YES);
+            ((void (*)(id, SEL, id))objc_msgSend)(s, sel_registerName("setTodo:"), todo);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(rtMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": s}, NSMakeRange(off, chkText.length));
+            // No +1 because last paragraph has no trailing \n
+        }
+
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            rtNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, rtContent.length), rtContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(rtNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(rtNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        // Add a note-to-note link (ICInlineAttachment) to the note
+        NSString *rtNoteID = noteToDict(rtNote)[@"id"];
+        // Use testTitle2 note as the link target
+        id rtLinkTarget = findNote(viewContext, testTitle2, testFolderName);
+        if (rtLinkTarget) {
+            NSString *rtTargetID = noteToDict(rtLinkTarget)[@"id"];
+            // Redirect stdout during cmdAddNoteLink (it prints JSON)
+            int savedOut = dup(STDOUT_FILENO);
+            int devNull1 = open("/dev/null", O_WRONLY);
+            dup2(devNull1, STDOUT_FILENO); close(devNull1);
+            cmdAddNoteLink(viewContext, rtNoteID, rtTargetID, -1);
+            dup2(savedOut, STDOUT_FILENO); close(savedOut);
+        }
+
+        // Re-fetch the note after adding the link
+        rtNote = findNoteByID(viewContext, rtNoteID);
+
+        // 2. Read original note as para model
+        NSArray *origModel = noteToParaModel(rtNote);
+        // Filter leading empty paragraphs
+        NSMutableArray *origFiltered = [NSMutableArray array];
+        BOOL rtFC = NO;
+        for (NSDictionary *p in origModel) {
+            if (!rtFC && [p[@"text"] length] == 0) continue;
+            rtFC = YES;
+            [origFiltered addObject:p];
+        }
+
+        // 3. Read as markdown
+        NSString *rtMarkdown = paraModelToMarkdown(origFiltered);
+
+        // 4. Create a new empty note and write the markdown to it
+        id rtNewNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        ((void (*)(id, SEL))objc_msgSend)(rtNewNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+        NSString *rtNewNoteID = noteToDict(rtNewNote)[@"id"];
+
+        // Redirect stdout during write
+        {
+            int savedOut = dup(STDOUT_FILENO);
+            int devNull1 = open("/dev/null", O_WRONLY);
+            dup2(devNull1, STDOUT_FILENO); close(devNull1);
+            cmdWriteMarkdownWithString(rtNewNote, viewContext, rtMarkdown, NO, NO);
+            dup2(savedOut, STDOUT_FILENO); close(savedOut);
+        }
+
+        // 5. Re-read the round-tripped note as para model
+        rtNewNote = findNoteByID(viewContext, rtNewNoteID);
+        NSArray *rtNewModel = noteToParaModel(rtNewNote);
+        NSMutableArray *rtNewFiltered = [NSMutableArray array];
+        BOOL rtFC2 = NO;
+        for (NSDictionary *p in rtNewModel) {
+            if (!rtFC2 && [p[@"text"] length] == 0) continue;
+            rtFC2 = YES;
+            [rtNewFiltered addObject:p];
+        }
+
+        // 6. Compare paragraph by paragraph
+        BOOL rtPass = YES;
+        NSString *rtFailMsg = nil;
+
+        if (origFiltered.count != rtNewFiltered.count) {
+            rtPass = NO;
+            rtFailMsg = [NSString stringWithFormat:@"paragraph count mismatch: orig=%lu rt=%lu",
+                (unsigned long)origFiltered.count, (unsigned long)rtNewFiltered.count];
+        } else {
+            for (NSUInteger pi = 0; pi < origFiltered.count; pi++) {
+                NSDictionary *origP = origFiltered[pi];
+                NSDictionary *rtP = rtNewFiltered[pi];
+
+                // Compare text (note-to-note links use U+FFFC in orig but display text in rt)
+                NSString *origText = origP[@"text"];
+                NSString *rtText = rtP[@"text"];
+                // For note link paragraphs, the original has U+FFFC while round-tripped has the display text
+                // So skip text comparison for paragraphs containing U+FFFC
+                BOOL hasFFFC = [origText containsString:@"\uFFFC"];
+                if (!hasFFFC && ![origText isEqualToString:rtText]) {
+                    rtPass = NO;
+                    rtFailMsg = [NSString stringWithFormat:@"para %lu text mismatch: '%@' vs '%@'",
+                        (unsigned long)pi, origText, rtText];
+                    break;
+                }
+
+                // Compare style
+                if ([origP[@"style"] integerValue] != [rtP[@"style"] integerValue]) {
+                    rtPass = NO;
+                    rtFailMsg = [NSString stringWithFormat:@"para %lu style mismatch: %@ vs %@",
+                        (unsigned long)pi, origP[@"style"], rtP[@"style"]];
+                    break;
+                }
+
+                // Compare indent
+                if ([origP[@"indent"] unsignedIntegerValue] != [rtP[@"indent"] unsignedIntegerValue]) {
+                    rtPass = NO;
+                    rtFailMsg = [NSString stringWithFormat:@"para %lu indent mismatch: %@ vs %@",
+                        (unsigned long)pi, origP[@"indent"], rtP[@"indent"]];
+                    break;
+                }
+
+                // Compare checked state for checklists
+                if ([origP[@"style"] integerValue] == 103) {
+                    if ([origP[@"todoChecked"] boolValue] != [rtP[@"todoChecked"] boolValue]) {
+                        rtPass = NO;
+                        rtFailMsg = [NSString stringWithFormat:@"para %lu checked mismatch: %@ vs %@",
+                            (unsigned long)pi, origP[@"todoChecked"], rtP[@"todoChecked"]];
+                        break;
+                    }
+                }
+
+                // Compare link count
+                NSArray *origRuns = origP[@"runs"];
+                NSArray *rtRuns = rtP[@"runs"];
+                NSUInteger origLinkCount = 0, rtLinkCount = 0;
+                for (NSDictionary *r in origRuns) { if (r[@"link"]) origLinkCount++; }
+                for (NSDictionary *r in rtRuns) { if (r[@"link"]) rtLinkCount++; }
+                if (origLinkCount != rtLinkCount) {
+                    rtPass = NO;
+                    rtFailMsg = [NSString stringWithFormat:@"para %lu link count mismatch: %lu vs %lu",
+                        (unsigned long)pi, (unsigned long)origLinkCount, (unsigned long)rtLinkCount];
+                    break;
+                }
+            }
+        }
+
+        if (rtPass) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (%s)\n", [rtFailMsg UTF8String]); failed++; }
+
+        // --- Test: Raw attribute round-trip ---
+        fprintf(stderr, "Test: Raw attribute round-trip...\n");
+        {
+            // Build attr model for original note (same logic as cmdReadAttrsNote but in-process)
+            NSArray *(^buildAttrModel)(id) = ^NSArray *(id aNote) {
+                id aDoc = ((id (*)(id, SEL))objc_msgSend)(aNote, sel_registerName("document"));
+                id aMs = ((id (*)(id, SEL))objc_msgSend)(aDoc, sel_registerName("mergeableString"));
+                NSAttributedString *aAttrStr = ((id (*)(id, SEL))objc_msgSend)(aNote, sel_registerName("attributedString"));
+                NSString *aFullText = [aAttrStr string];
+                NSUInteger aLen = aFullText.length;
+                if (aLen == 0) return @[];
+
+                NSMutableArray *ranges = [NSMutableArray array];
+                NSUInteger aIdx = 0;
+                NSRange aEffRange;
+                while (aIdx < aLen) {
+                    NSDictionary *aAttrs = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                        aMs, sel_registerName("attributesAtIndex:effectiveRange:"), aIdx, &aEffRange);
+                    NSString *aText = [aFullText substringWithRange:aEffRange];
+                    NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+                    entry[@"text"] = aText;
+                    id aStyle = aAttrs[@"TTStyle"];
+                    if (aStyle) {
+                        entry[@"style"] = @(((NSInteger (*)(id, SEL))objc_msgSend)(aStyle, sel_registerName("style")));
+                        entry[@"indent"] = @(((NSUInteger (*)(id, SEL))objc_msgSend)(aStyle, sel_registerName("indent")));
+                        id aTodo = ((id (*)(id, SEL))objc_msgSend)(aStyle, sel_registerName("todo"));
+                        if (aTodo) entry[@"todoDone"] = @(((BOOL (*)(id, SEL))objc_msgSend)(aTodo, sel_registerName("done")));
+                    }
+                    if (aAttrs[@"NSLink"]) entry[@"hasLink"] = @YES;
+                    if (aAttrs[@"NSAttachment"]) entry[@"hasAttachment"] = @YES;
+                    [ranges addObject:entry];
+                    aIdx = aEffRange.location + aEffRange.length;
+                }
+                return ranges;
+            };
+
+            NSArray *origAttrs = buildAttrModel(rtNote);
+            NSArray *rtAttrs = buildAttrModel(rtNewNote);
+
+            // Group attributes by paragraph (split on \n in text)
+            NSArray *(^groupByParagraph)(NSArray *) = ^NSArray *(NSArray *attrs) {
+                NSMutableArray *groups = [NSMutableArray array];
+                NSMutableArray *currentGroup = [NSMutableArray array];
+                for (NSDictionary *entry in attrs) {
+                    NSString *eText = entry[@"text"];
+                    // Split text on \n - if contains \n, emit current group and start new
+                    NSArray *parts = [eText componentsSeparatedByString:@"\n"];
+                    if (parts.count <= 1) {
+                        [currentGroup addObject:entry];
+                    } else {
+                        // First part goes to current group
+                        if ([parts[0] length] > 0) {
+                            NSMutableDictionary *firstEntry = [entry mutableCopy];
+                            firstEntry[@"text"] = parts[0];
+                            [currentGroup addObject:firstEntry];
+                        }
+                        [groups addObject:currentGroup];
+                        // Middle parts are their own groups (empty usually)
+                        for (NSUInteger mi = 1; mi < parts.count - 1; mi++) {
+                            NSMutableArray *midGroup = [NSMutableArray array];
+                            if ([parts[mi] length] > 0) {
+                                NSMutableDictionary *midEntry = [entry mutableCopy];
+                                midEntry[@"text"] = parts[mi];
+                                [midGroup addObject:midEntry];
+                            }
+                            [groups addObject:midGroup];
+                        }
+                        // Last part starts a new group
+                        currentGroup = [NSMutableArray array];
+                        NSString *lastPart = parts[parts.count - 1];
+                        if (lastPart.length > 0) {
+                            NSMutableDictionary *lastEntry = [entry mutableCopy];
+                            lastEntry[@"text"] = lastPart;
+                            [currentGroup addObject:lastEntry];
+                        }
+                    }
+                }
+                if (currentGroup.count > 0) [groups addObject:currentGroup];
+                return groups;
+            };
+
+            NSArray *origGroups = groupByParagraph(origAttrs);
+            NSArray *rtGroups = groupByParagraph(rtAttrs);
+
+            // Filter out empty leading groups
+            NSMutableArray *origGroupsFiltered = [NSMutableArray array];
+            BOOL ogFC = NO;
+            for (NSArray *g in origGroups) {
+                if (!ogFC && g.count == 0) continue;
+                ogFC = YES;
+                [origGroupsFiltered addObject:g];
+            }
+            NSMutableArray *rtGroupsFiltered = [NSMutableArray array];
+            BOOL rgFC = NO;
+            for (NSArray *g in rtGroups) {
+                if (!rgFC && g.count == 0) continue;
+                rgFC = YES;
+                [rtGroupsFiltered addObject:g];
+            }
+
+            BOOL attrPass = YES;
+            NSString *attrFailMsg = nil;
+
+            if (origGroupsFiltered.count != rtGroupsFiltered.count) {
+                attrPass = NO;
+                attrFailMsg = [NSString stringWithFormat:@"paragraph group count mismatch: orig=%lu rt=%lu",
+                    (unsigned long)origGroupsFiltered.count, (unsigned long)rtGroupsFiltered.count];
+            } else {
+                for (NSUInteger gi = 0; gi < origGroupsFiltered.count; gi++) {
+                    NSArray *origG = origGroupsFiltered[gi];
+                    NSArray *rtG = rtGroupsFiltered[gi];
+
+                    // Compare each attribute range in the group
+                    // Build summary for each group: style, indent, todoDone, hasLink, hasAttachment
+                    // We compare group-level properties since individual ranges may differ
+                    NSInteger origStyle = -1, rtStyle = -1;
+                    NSUInteger origIndent = 0, rtIndent = 0;
+                    BOOL origTodoDone = NO, rtTodoDone = NO;
+                    BOOL origHasLink = NO, rtHasLink = NO;
+                    BOOL origHasAtt = NO, rtHasAtt = NO;
+
+                    for (NSDictionary *e in origG) {
+                        if (e[@"style"]) origStyle = [e[@"style"] integerValue];
+                        if (e[@"indent"]) origIndent = [e[@"indent"] unsignedIntegerValue];
+                        if ([e[@"todoDone"] boolValue]) origTodoDone = YES;
+                        if ([e[@"hasLink"] boolValue]) origHasLink = YES;
+                        if ([e[@"hasAttachment"] boolValue]) origHasAtt = YES;
+                    }
+                    for (NSDictionary *e in rtG) {
+                        if (e[@"style"]) rtStyle = [e[@"style"] integerValue];
+                        if (e[@"indent"]) rtIndent = [e[@"indent"] unsignedIntegerValue];
+                        if ([e[@"todoDone"] boolValue]) rtTodoDone = YES;
+                        if ([e[@"hasLink"] boolValue]) rtHasLink = YES;
+                        if ([e[@"hasAttachment"] boolValue]) rtHasAtt = YES;
+                    }
+
+                    if (origStyle != rtStyle) {
+                        attrPass = NO;
+                        attrFailMsg = [NSString stringWithFormat:@"group %lu style mismatch: %ld vs %ld",
+                            (unsigned long)gi, (long)origStyle, (long)rtStyle];
+                        break;
+                    }
+                    if (origIndent != rtIndent) {
+                        attrPass = NO;
+                        attrFailMsg = [NSString stringWithFormat:@"group %lu indent mismatch: %lu vs %lu",
+                            (unsigned long)gi, (unsigned long)origIndent, (unsigned long)rtIndent];
+                        break;
+                    }
+                    if (origStyle == 103 && origTodoDone != rtTodoDone) {
+                        attrPass = NO;
+                        attrFailMsg = [NSString stringWithFormat:@"group %lu todoDone mismatch: %d vs %d",
+                            (unsigned long)gi, origTodoDone, rtTodoDone];
+                        break;
+                    }
+                    if (origHasLink != rtHasLink) {
+                        attrPass = NO;
+                        attrFailMsg = [NSString stringWithFormat:@"group %lu link presence mismatch: %d vs %d",
+                            (unsigned long)gi, origHasLink, rtHasLink];
+                        break;
+                    }
+                    // Note: hasAttachment won't survive round-trip for note-to-note links (they become [text](url) links)
+                    // So we check that if orig has attachment, rt has either attachment or link
+                    if (origHasAtt && !rtHasAtt && !rtHasLink) {
+                        attrPass = NO;
+                        attrFailMsg = [NSString stringWithFormat:@"group %lu: orig has attachment but rt has neither attachment nor link",
+                            (unsigned long)gi];
+                        break;
+                    }
+                }
+            }
+
+            if (attrPass) { fprintf(stderr, "  PASS\n"); passed++; }
+            else { fprintf(stderr, "  FAIL (%s)\n", [attrFailMsg UTF8String]); failed++; }
+        }
+
+        // Cleanup round-trip test notes
+        deleteNote(findNoteByID(viewContext, rtNoteID), viewContext);
+        deleteNote(findNoteByID(viewContext, rtNewNoteID), viewContext);
+        [viewContext save:nil];
+    }
+
     // Test 19: Delete notes
     fprintf(stderr, "Test 19: Delete notes...\n");
     {

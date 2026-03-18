@@ -104,17 +104,22 @@ static NSArray *fetchNotes(id viewContext, NSString *folderName, NSUInteger limi
     return notes;
 }
 
-static id findNote(id viewContext, NSString *title, NSString *folderName) {
+static NSArray *findNotes(id viewContext, NSString *title, NSString *folderName) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
     if (folderName) {
         request.predicate = [NSPredicate predicateWithFormat:@"title CONTAINS %@ AND folder.title == %@", title, folderName];
     } else {
         request.predicate = [NSPredicate predicateWithFormat:@"title CONTAINS %@", title];
     }
-    request.fetchLimit = 1;
     NSError *error = nil;
     NSArray *notes = [viewContext executeFetchRequest:request error:&error];
-    if (error || notes.count == 0) return nil;
+    if (error || notes.count == 0) return @[];
+    return notes;
+}
+
+static id findNote(id viewContext, NSString *title, NSString *folderName) {
+    NSArray *notes = findNotes(viewContext, title, folderName);
+    if (notes.count == 0) return nil;
     return notes[0];
 }
 
@@ -258,9 +263,15 @@ static int cmdGetNote(id note) {
 }
 
 static int cmdGet(id viewContext, NSString *title, NSString *folderName) {
-    id note = findNote(viewContext, title, folderName);
-    if (!note) errorExit([NSString stringWithFormat:@"Note not found: %@", title]);
-    return cmdGetNote(note);
+    NSArray *notes = findNotes(viewContext, title, folderName);
+    if (notes.count == 0) errorExit([NSString stringWithFormat:@"Note not found: %@", title]);
+    if (notes.count == 1) return cmdGetNote(notes[0]);
+    NSMutableArray *results = [NSMutableArray array];
+    for (id note in notes) {
+        [results addObject:noteToDict(note)];
+    }
+    printJSON(results);
+    return 0;
 }
 
 static int cmdReadNote(id note) {
@@ -4263,6 +4274,34 @@ static int cmdTest(id viewContext) {
         }
         if (!hasLink) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (link was not rejected)\n"); failed++; }
+    }
+
+    // Test: get --title returns multiple matches
+    fprintf(stderr, "Test: get --title multiple matches...\n");
+    {
+        // Both testTitle and testTitle2 contain "__notes_cli_test"
+        NSArray *matches = findNotes(viewContext, @"__notes_cli_test", testFolderName);
+        if (matches.count >= 2) {
+            // Verify cmdGet outputs a JSON array via subprocess
+            NSString *cmd = [NSString stringWithFormat:@"'%s' get --title '__notes_cli_test' --folder '%@' 2>/dev/null", exePath, testFolderName];
+            FILE *fp = popen([cmd UTF8String], "r");
+            NSMutableData *outData = [NSMutableData data];
+            if (fp) {
+                char buf[4096];
+                size_t n;
+                while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) [outData appendBytes:buf length:n];
+                pclose(fp);
+            }
+            id parsed = [NSJSONSerialization JSONObjectWithData:outData options:0 error:nil];
+            if ([parsed isKindOfClass:[NSArray class]] && [(NSArray *)parsed count] >= 2) {
+                fprintf(stderr, "  PASS (%lu matches)\n", (unsigned long)[(NSArray *)parsed count]); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (expected array with >=2 items, got %s)\n",
+                    [[parsed description] UTF8String]); failed++;
+            }
+        } else {
+            fprintf(stderr, "  FAIL (findNotes returned %lu, expected >=2)\n", (unsigned long)matches.count); failed++;
+        }
     }
 
     // Test 19: Delete notes

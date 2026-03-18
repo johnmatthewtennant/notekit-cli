@@ -13,6 +13,7 @@ static Class ICNoteContextClass;
 static Class ICNoteClass;
 static Class ICTTParagraphStyleClass;
 static Class ICTTTodoClass;
+static Class ICTTAttachmentClass;
 
 static void loadFramework(void) {
     [[NSBundle bundleWithPath:@"/System/Library/PrivateFrameworks/NotesShared.framework"] load];
@@ -20,6 +21,7 @@ static void loadFramework(void) {
     ICNoteClass = NSClassFromString(@"ICNote");
     ICTTParagraphStyleClass = NSClassFromString(@"ICTTParagraphStyle");
     ICTTTodoClass = NSClassFromString(@"ICTTTodo");
+    ICTTAttachmentClass = NSClassFromString(@"ICTTAttachment");
 }
 
 static id getViewContext(void) {
@@ -866,6 +868,83 @@ static int cmdAddLink(id viewContext, NSString *sourceId, NSString *targetId,
         @"targetId": targetId,
         @"text": displayText,
         @"url": [linkURL absoluteString]
+    });
+    return 0;
+}
+
+static int cmdAddNoteLink(id viewContext, NSString *sourceId, NSString *targetId, NSInteger position) {
+    id sourceNote = findNoteByID(viewContext, sourceId);
+    if (!sourceNote) errorExit([NSString stringWithFormat:@"Source note not found: %@", sourceId]);
+
+    id targetNote = findNoteByID(viewContext, targetId);
+    if (!targetNote) errorExit([NSString stringWithFormat:@"Target note not found: %@", targetId]);
+
+    Class ICInlineAttachmentClass = NSClassFromString(@"ICInlineAttachment");
+    if (!ICInlineAttachmentClass) errorExit(@"ICInlineAttachment class not available");
+
+    id doc = ((id (*)(id, SEL))objc_msgSend)(sourceNote, sel_registerName("document"));
+    id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+    NSUInteger oldLen = ((NSUInteger (*)(id, SEL))objc_msgSend)(ms, sel_registerName("length"));
+
+    if (position < -1) errorExit(@"Position must be >= 0 or omitted");
+
+    NSUInteger insertPos;
+    BOOL prependNewline;
+    if (position < 0) {
+        insertPos = oldLen;
+        prependNewline = YES;
+    } else {
+        insertPos = (NSUInteger)position;
+        if (insertPos > oldLen) errorExit(@"Position exceeds note length");
+        prependNewline = NO;
+    }
+
+    ((void (*)(id, SEL))objc_msgSend)(sourceNote, sel_registerName("beginEditing"));
+
+    // Insert newline separator if appending
+    if (prependNewline) {
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(
+            ms, sel_registerName("insertString:atIndex:"), @"\n", insertPos);
+        insertPos += 1;
+    }
+
+    // Insert U+FFFC replacement character at position
+    ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(
+        ms, sel_registerName("insertString:atIndex:"), @"\uFFFC", insertPos);
+
+    // Apply body style to the U+FFFC character
+    id bodyStyle = [[ICTTParagraphStyleClass alloc] init];
+    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(bodyStyle, sel_registerName("setStyle:"), 3);
+    ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
+        @{@"TTStyle": bodyStyle}, NSMakeRange(insertPos, 1));
+
+    // Create the ICInlineAttachment
+    NSString *attUUID = [[NSUUID UUID] UUIDString];
+    id attachment = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(
+        ICInlineAttachmentClass,
+        sel_registerName("newLinkAttachmentWithIdentifier:toNote:fromNote:parentAttachment:"),
+        attUUID, targetNote, sourceNote, nil);
+    if (!attachment) errorExit(@"Failed to create ICInlineAttachment");
+
+    ((void (*)(id, SEL, id))objc_msgSend)(sourceNote, sel_registerName("addInlineAttachmentsObject:"), attachment);
+
+    NSUInteger insertedLen = prependNewline ? 2 : 1;
+    NSUInteger newLen = oldLen + insertedLen;
+    ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+        sourceNote, sel_registerName("edited:range:changeInLength:"),
+        1, NSMakeRange(0, newLen), (NSInteger)insertedLen);
+    ((void (*)(id, SEL))objc_msgSend)(sourceNote, sel_registerName("endEditing"));
+    ((void (*)(id, SEL))objc_msgSend)(sourceNote, sel_registerName("saveNoteData"));
+    NSError *error = nil;
+    [viewContext save:&error];
+    if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
+
+    NSString *displayText = ((id (*)(id, SEL))objc_msgSend)(attachment, sel_registerName("displayText"));
+
+    printJSON(@{
+        @"id": sourceId,
+        @"targetId": targetId,
+        @"text": displayText ?: @""
     });
     return 0;
 }
@@ -2322,10 +2401,11 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
 
                 NSArray *newRuns = newPara[@"runs"];
                 if (newRuns) {
+                    NSInteger runDelta = 0; // tracks offset shift from note-link replacements
                     for (NSDictionary *run in newRuns) {
-                        NSUInteger runStart = [run[@"start"] unsignedIntegerValue];
+                        NSUInteger runStart = [run[@"start"] unsignedIntegerValue] + runDelta;
                         NSUInteger runLen = [run[@"length"] unsignedIntegerValue];
-                        if (runStart + runLen > paraLen) continue;
+                        if (runStart + runLen > (NSUInteger)((NSInteger)paraLen + runDelta)) continue;
                         NSMutableDictionary *runAttrs = [patchedAttrs mutableCopy];
                         if (run[@"link"]) {
                             NSURL *rawURL = [NSURL URLWithString:run[@"link"]];
@@ -2337,9 +2417,41 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
                                 if (targetId) {
                                     id targetNote = findNoteByID(viewContext, targetId);
                                     if (targetNote) {
-                                        Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities");
-                                        NSURL *nativeURL = ICAppURLUtilities ? ((id (*)(id, SEL, id))objc_msgSend)(ICAppURLUtilities, sel_registerName("appURLForNote:"), targetNote) : nil;
-                                        if (nativeURL) runAttrs[@"NSLink"] = nativeURL;
+                                        // Create native ICInlineAttachment note-to-note link
+                                        Class ICInlineAttachmentClass = NSClassFromString(@"ICInlineAttachment");
+                                        if (ICInlineAttachmentClass) {
+                                            // Replace display text with U+FFFC
+                                            ((void (*)(id, SEL, NSRange))objc_msgSend)(ms, sel_registerName("deleteCharactersInRange:"),
+                                                NSMakeRange(pos + runStart, runLen));
+                                            ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"),
+                                                @"\uFFFC", pos + runStart);
+                                            NSInteger delta = 1 - (NSInteger)runLen;
+                                            runDelta += delta;
+                                            cumulativeDelta += delta;
+                                            runLen = 1;
+
+                                            // Create the inline attachment (CoreData entity)
+                                            NSString *attUUID = [[NSUUID UUID] UUIDString];
+                                            id attachment = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(
+                                                ICInlineAttachmentClass,
+                                                sel_registerName("newLinkAttachmentWithIdentifier:toNote:fromNote:parentAttachment:"),
+                                                attUUID, targetNote, note, nil);
+                                            if (attachment) {
+                                                ((void (*)(id, SEL, id))objc_msgSend)(note, sel_registerName("addInlineAttachmentsObject:"), attachment);
+                                                // Create ICTTAttachment for the mergeableString attribute
+                                                if (ICTTAttachmentClass) {
+                                                    id ttAtt = [[ICTTAttachmentClass alloc] init];
+                                                    ((void (*)(id, SEL, id))objc_msgSend)(ttAtt, sel_registerName("setAttachmentIdentifier:"), attUUID);
+                                                    ((void (*)(id, SEL, id))objc_msgSend)(ttAtt, sel_registerName("setAttachmentUTI:"), @"com.apple.notes.inlinetextattachment.link");
+                                                    runAttrs[@"NSAttachment"] = ttAtt;
+                                                }
+                                            }
+                                        } else {
+                                            // Fallback: use NSLink if ICInlineAttachment unavailable
+                                            Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities");
+                                            NSURL *nativeURL = ICAppURLUtilities ? ((id (*)(id, SEL, id))objc_msgSend)(ICAppURLUtilities, sel_registerName("appURLForNote:"), targetNote) : nil;
+                                            if (nativeURL) runAttrs[@"NSLink"] = nativeURL;
+                                        }
                                     }
                                 }
                             } else if (rawURL) {
@@ -2388,11 +2500,12 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
                 attrs, NSMakeRange(pos, toInsert.length));
 
             NSArray *newRuns = newPara[@"runs"];
+            NSInteger insertRunDelta = 0; // tracks offset shift from note-link replacements
             if (newRuns) {
                 for (NSDictionary *run in newRuns) {
-                    NSUInteger runStart = [run[@"start"] unsignedIntegerValue];
+                    NSUInteger runStart = [run[@"start"] unsignedIntegerValue] + insertRunDelta;
                     NSUInteger runLen = [run[@"length"] unsignedIntegerValue];
-                    if (runStart + runLen > newText.length) continue;
+                    if (runStart + runLen > (NSUInteger)((NSInteger)newText.length + insertRunDelta)) continue;
                     NSMutableDictionary *runAttrs = [attrs mutableCopy];
                     if (run[@"link"]) {
                         NSURL *rawURL = [NSURL URLWithString:run[@"link"]];
@@ -2404,9 +2517,40 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
                             if (targetId) {
                                 id targetNote = findNoteByID(viewContext, targetId);
                                 if (targetNote) {
-                                    Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities");
-                                    NSURL *nativeURL = ICAppURLUtilities ? ((id (*)(id, SEL, id))objc_msgSend)(ICAppURLUtilities, sel_registerName("appURLForNote:"), targetNote) : nil;
-                                    if (nativeURL) runAttrs[@"NSLink"] = nativeURL;
+                                    // Create native ICInlineAttachment note-to-note link
+                                    Class ICInlineAttachmentClass = NSClassFromString(@"ICInlineAttachment");
+                                    if (ICInlineAttachmentClass) {
+                                        // Replace display text with U+FFFC
+                                        ((void (*)(id, SEL, NSRange))objc_msgSend)(ms, sel_registerName("deleteCharactersInRange:"),
+                                            NSMakeRange(pos + runStart, runLen));
+                                        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"),
+                                            @"\uFFFC", pos + runStart);
+                                        NSInteger delta = 1 - (NSInteger)runLen;
+                                        insertRunDelta += delta;
+                                        runLen = 1;
+
+                                        // Create the inline attachment (CoreData entity)
+                                        NSString *attUUID = [[NSUUID UUID] UUIDString];
+                                        id attachment = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(
+                                            ICInlineAttachmentClass,
+                                            sel_registerName("newLinkAttachmentWithIdentifier:toNote:fromNote:parentAttachment:"),
+                                            attUUID, targetNote, note, nil);
+                                        if (attachment) {
+                                            ((void (*)(id, SEL, id))objc_msgSend)(note, sel_registerName("addInlineAttachmentsObject:"), attachment);
+                                            // Create ICTTAttachment for the mergeableString attribute
+                                            if (ICTTAttachmentClass) {
+                                                id ttAtt = [[ICTTAttachmentClass alloc] init];
+                                                ((void (*)(id, SEL, id))objc_msgSend)(ttAtt, sel_registerName("setAttachmentIdentifier:"), attUUID);
+                                                ((void (*)(id, SEL, id))objc_msgSend)(ttAtt, sel_registerName("setAttachmentUTI:"), @"com.apple.notes.inlinetextattachment.link");
+                                                runAttrs[@"NSAttachment"] = ttAtt;
+                                            }
+                                        }
+                                    } else {
+                                        // Fallback: use NSLink if ICInlineAttachment unavailable
+                                        Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities");
+                                        NSURL *nativeURL = ICAppURLUtilities ? ((id (*)(id, SEL, id))objc_msgSend)(ICAppURLUtilities, sel_registerName("appURLForNote:"), targetNote) : nil;
+                                        if (nativeURL) runAttrs[@"NSLink"] = nativeURL;
+                                    }
                                 }
                             }
                         } else if (rawURL) {
@@ -2419,7 +2563,7 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
                 }
             }
 
-            cumulativeDelta += (NSInteger)toInsert.length;
+            cumulativeDelta += (NSInteger)toInsert.length + insertRunDelta;
         }
 
         } @catch (NSException *mutationEx) {
@@ -2463,7 +2607,12 @@ static void deleteNote(id note, id viewContext) {
     // so deleteObject would destroy attachment data that other notes may reference.
     id inlineAttachments = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("inlineAttachments"));
     if (inlineAttachments && [inlineAttachments count] > 0) {
-        ((void (*)(id, SEL, id))objc_msgSend)(note, sel_registerName("removeInlineAttachments:"), inlineAttachments);
+        // Delete inline attachment objects that have a required note relationship
+        // (e.g. ICInlineAttachment link attachments) to avoid orphan validation errors.
+        NSSet *inlineAttSet = [inlineAttachments copy];
+        for (id ia in inlineAttSet) {
+            [viewContext deleteObject:ia];
+        }
     }
     id attachments = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attachments"));
     if (attachments && [attachments count] > 0) {
@@ -3060,6 +3209,76 @@ static int cmdTest(id viewContext) {
         NSString *aId = noteToDict(noteA)[@"id"];
         NSString *bId = noteToDict(noteB)[@"id"];
         NSString *cmd = [NSString stringWithFormat:@"'%s' add-link --id '%@' --target '%@' --position 99999 2>/dev/null", exePath, aId, bId];
+        int ret = system([cmd UTF8String]);
+        if (ret != 0) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (should have failed)\n"); failed++; }
+    }
+
+    // Test: add-note-link (append)
+    fprintf(stderr, "Test: add-note-link (append)...\n");
+    {
+        id noteA = findNote(viewContext, testTitle, testFolderName);
+        id noteB = findNote(viewContext, testTitle2, testFolderName);
+        if (noteA && noteB) {
+            NSString *aId = noteToDict(noteA)[@"id"];
+            NSString *bId = noteToDict(noteB)[@"id"];
+            int ret = cmdAddNoteLink(viewContext, aId, bId, -1);
+            if (ret == 0) {
+                noteA = findNoteByID(viewContext, aId);
+                NSString *fullText = [((id (*)(id, SEL))objc_msgSend)(noteA, sel_registerName("attributedString")) string];
+                // The U+FFFC character should be present
+                BOOL foundUFFFC = [fullText containsString:@"\uFFFC"];
+                if (foundUFFFC) { fprintf(stderr, "  PASS\n"); passed++; }
+                else { fprintf(stderr, "  FAIL (U+FFFC not found in text)\n"); failed++; }
+            } else { fprintf(stderr, "  FAIL (cmdAddNoteLink returned %d)\n", ret); failed++; }
+        } else { fprintf(stderr, "  FAIL (notes not found)\n"); failed++; }
+    }
+
+    // Test: add-note-link (position)
+    fprintf(stderr, "Test: add-note-link (position)...\n");
+    {
+        NSString *anlTitle = @"__notes_cli_add_note_link_pos_test__";
+        id anlNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id anlDoc = ((id (*)(id, SEL))objc_msgSend)(anlNote, sel_registerName("document"));
+        id anlMs = ((id (*)(id, SEL))objc_msgSend)(anlDoc, sel_registerName("mergeableString"));
+        NSString *anlContent = [NSString stringWithFormat:@"%@\nHello World", anlTitle];
+        ((void (*)(id, SEL))objc_msgSend)(anlNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(anlMs, sel_registerName("insertString:atIndex:"), anlContent, 0);
+        id anlStyle = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(anlStyle, sel_registerName("setStyle:"), 3);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(anlMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": anlStyle}, NSMakeRange(anlTitle.length + 1, anlContent.length - anlTitle.length - 1));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            anlNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, anlContent.length), anlContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(anlNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(anlNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSString *anlId = noteToDict(anlNote)[@"id"];
+        id noteB = findNote(viewContext, testTitle2, testFolderName);
+        NSString *bId = noteToDict(noteB)[@"id"];
+
+        // Insert at position after the title newline (title.length + 1 = first char of body)
+        NSUInteger insertAt = anlTitle.length + 1;
+        int ret = cmdAddNoteLink(viewContext, anlId, bId, (NSInteger)insertAt);
+        if (ret == 0) {
+            anlNote = findNoteByID(viewContext, anlId);
+            NSString *newText = [((id (*)(id, SEL))objc_msgSend)(anlNote, sel_registerName("attributedString")) string];
+            unichar ch = [newText characterAtIndex:insertAt];
+            if (ch == 0xFFFC) { fprintf(stderr, "  PASS\n"); passed++; }
+            else { fprintf(stderr, "  FAIL (U+FFFC not at position %lu)\n", (unsigned long)insertAt); failed++; }
+        } else { fprintf(stderr, "  FAIL (cmdAddNoteLink returned %d)\n", ret); failed++; }
+
+        deleteNote(findNoteByID(viewContext, anlId), viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: add-note-link error - invalid target (subprocess)
+    fprintf(stderr, "Test: add-note-link error (invalid target)...\n");
+    {
+        id noteA = findNote(viewContext, testTitle, testFolderName);
+        NSString *aId = noteToDict(noteA)[@"id"];
+        NSString *cmd = [NSString stringWithFormat:@"'%s' add-note-link --id '%@' --target NONEXISTENT_ID 2>/dev/null", exePath, aId];
         int ret = system([cmd UTF8String]);
         if (ret != 0) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (should have failed)\n"); failed++; }
@@ -4884,6 +5103,7 @@ static void usage(void) {
     fprintf(stderr, "  notekit duplicate --id <id> [--new-title <new-title>]\n");
     fprintf(stderr, "  notekit delete-line --id <id> --search-text <search-text>\n");
     fprintf(stderr, "  notekit add-link --id <id> --target <id> [--text <text>] [--position <n>]   Insert note-to-note link\n");
+    fprintf(stderr, "  notekit add-note-link --id <id> --target <id> [--position <n>]            Insert native ICInlineAttachment note link\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Skill management:\n");
     fprintf(stderr, "  notekit install-skill [--claude] [--agents] [--force]\n");
@@ -5125,6 +5345,12 @@ int main(int argc, const char *argv[]) {
             if (!opts[@"target"]) errorExit(@"add-link requires --target");
             NSInteger position = opts[@"position"] ? [opts[@"position"] integerValue] : -1;
             return cmdAddLink(viewContext, opts[@"id"], opts[@"target"], opts[@"text"], position);
+
+        } else if ([command isEqualToString:@"add-note-link"]) {
+            if (!opts[@"id"]) errorExit(@"add-note-link requires --id");
+            if (!opts[@"target"]) errorExit(@"add-note-link requires --target");
+            NSInteger position = opts[@"position"] ? [opts[@"position"] integerValue] : -1;
+            return cmdAddNoteLink(viewContext, opts[@"id"], opts[@"target"], position);
 
         } else if ([command isEqualToString:@"install-skill"]) {
             BOOL wantClaude = [opts[@"claude"] isEqualToString:@"true"];

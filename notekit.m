@@ -5,6 +5,7 @@
 #import <objc/message.h>
 #import <CoreData/CoreData.h>
 #include <mach-o/dyld.h>
+#include <fcntl.h>
 
 // --- Framework Loading ---
 
@@ -1104,6 +1105,1052 @@ static int cmdDeleteLine(id viewContext, NSString *identifier, NSString *searchT
     saveNote(note, viewContext, length - deleteLen, -(NSInteger)deleteLen);
     printJSON(@{@"id": identifier, @"deletedLine": searchText, @"offset": @(paraStart), @"length": @(deleteLen)});
     return 0;
+}
+
+
+// --- Markdown Conversion ---
+
+static NSString *escapeMarkdown(NSString *text) {
+    // Replace \ first (so we don't double-escape), then all others
+    NSString *result = text;
+    result = [result stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
+    result = [result stringByReplacingOccurrencesOfString:@"*" withString:@"\\*"];
+    result = [result stringByReplacingOccurrencesOfString:@"_" withString:@"\\_"];
+    result = [result stringByReplacingOccurrencesOfString:@"~" withString:@"\\~"];
+    result = [result stringByReplacingOccurrencesOfString:@"[" withString:@"\\["];
+    result = [result stringByReplacingOccurrencesOfString:@"]" withString:@"\\]"];
+    result = [result stringByReplacingOccurrencesOfString:@"(" withString:@"\\("];
+    result = [result stringByReplacingOccurrencesOfString:@")" withString:@"\\)"];
+    result = [result stringByReplacingOccurrencesOfString:@"<" withString:@"\\<"];
+    return result;
+}
+
+static NSString *unescapeMarkdown(NSString *text) {
+    NSMutableString *result = [NSMutableString string];
+    NSUInteger i = 0;
+    while (i < text.length) {
+        unichar c = [text characterAtIndex:i];
+        if (c == '\\' && i + 1 < text.length) {
+            unichar next = [text characterAtIndex:i + 1];
+            if (next == '*' || next == '_' || next == '~' || next == '[' || next == ']' ||
+                next == '(' || next == ')' || next == '\\' || next == '<' || next == '#' ||
+                next == '-' || next == '.' || next == '>') {
+                [result appendFormat:@"%C", next];
+                i += 2;
+                continue;
+            }
+        }
+        [result appendFormat:@"%C", c];
+        i++;
+    }
+    return result;
+}
+
+static NSString *normalizeParaText(NSString *text) {
+    // Strip trailing whitespace only (preserve leading whitespace)
+    NSRange range = [text rangeOfCharacterFromSet:
+        [[NSCharacterSet whitespaceCharacterSet] invertedSet]
+        options:NSBackwardsSearch];
+    if (range.location == NSNotFound) return @"";
+    return [text substringToIndex:range.location + range.length];
+}
+
+static BOOL isAllowedLinkScheme(NSURL *url) {
+    NSString *scheme = [url.scheme lowercaseString];
+    return [scheme isEqualToString:@"http"] ||
+           [scheme isEqualToString:@"https"] ||
+           [scheme isEqualToString:@"mailto"] ||
+           [scheme isEqualToString:@"applenotes"];
+}
+
+// Helper: emit a paragraph from accumulated text/runs into paragraphs array
+static void emitParagraph(NSMutableArray *paragraphs, NSString *text, NSArray *runs,
+                          NSInteger style, NSUInteger indent, BOOL todoDone, NSString *uuid) {
+    NSString *trimmed = [text stringByTrimmingCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    // Split on newlines within a single UUID group (each line is a paragraph)
+    NSArray *lines = [trimmed componentsSeparatedByString:@"\n"];
+    NSUInteger lineOffset = 0;
+    for (NSUInteger li = 0; li < lines.count; li++) {
+        NSString *lineText = lines[li];
+        NSMutableDictionary *para = [NSMutableDictionary dictionary];
+        para[@"style"] = @(style);
+        para[@"indent"] = @(indent);
+        para[@"text"] = lineText;
+        if (style == 103) para[@"todoChecked"] = @(todoDone);
+        if (uuid) para[@"uuid"] = uuid;
+
+        // Build runs for this specific line
+        if (runs.count > 0) {
+            NSMutableArray *lineRuns = [NSMutableArray array];
+            // Find text start offset in the original (pre-trim) text
+            // The trimmed text starts after leading newlines
+            NSUInteger trimStart = 0;
+            while (trimStart < text.length && [text characterAtIndex:trimStart] == '\n') trimStart++;
+
+            NSUInteger lineStart = trimStart + lineOffset;
+            NSUInteger lineEnd = lineStart + lineText.length;
+
+            for (NSDictionary *run in runs) {
+                NSUInteger runStart = [run[@"start"] unsignedIntegerValue];
+                NSUInteger runLen = [run[@"length"] unsignedIntegerValue];
+                NSUInteger runEnd = runStart + runLen;
+
+                // Check overlap with this line
+                if (runEnd <= lineStart || runStart >= lineEnd) continue;
+
+                NSUInteger overlapStart = MAX(runStart, lineStart);
+                NSUInteger overlapEnd = MIN(runEnd, lineEnd);
+                if (overlapEnd <= overlapStart) continue;
+
+                NSMutableDictionary *lineRun = [NSMutableDictionary dictionary];
+                lineRun[@"start"] = @(overlapStart - lineStart);
+                lineRun[@"length"] = @(overlapEnd - overlapStart);
+                if (run[@"link"]) lineRun[@"link"] = run[@"link"];
+                if ([run[@"strikethrough"] boolValue]) lineRun[@"strikethrough"] = @YES;
+                [lineRuns addObject:lineRun];
+            }
+            if (lineRuns.count > 0) para[@"runs"] = lineRuns;
+        }
+
+        [paragraphs addObject:para];
+        lineOffset += lineText.length + 1; // +1 for the \n separator
+    }
+}
+
+// Build paragraph model from a note's mergeableString
+static NSArray *noteToParaModel(id note) {
+    id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+    id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+    NSAttributedString *attrStr = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attributedString"));
+    NSString *fullText = [attrStr string];
+    NSUInteger length = fullText.length;
+
+    if (length == 0) return @[];
+
+    NSMutableArray *paragraphs = [NSMutableArray array];
+    NSMutableString *currentText = [NSMutableString string];
+    NSMutableArray *currentRuns = [NSMutableArray array];
+    NSString *currentUUID = nil;
+    NSInteger currentStyle = -1;
+    BOOL currentTodoDone = NO;
+    NSUInteger currentIndent = 0;
+    NSUInteger runOffsetInPara = 0;
+    NSUInteger idx = 0;
+    NSRange effectiveRange;
+
+    while (idx < length) {
+        NSDictionary *attrs = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+            ms, sel_registerName("attributesAtIndex:effectiveRange:"), idx, &effectiveRange);
+        id style = attrs[@"TTStyle"];
+        NSInteger styleNum = style ? ((NSInteger (*)(id, SEL))objc_msgSend)(style, sel_registerName("style")) : 3;
+        NSString *uuid = style ? [((id (*)(id, SEL))objc_msgSend)(style, sel_registerName("uuid")) description] : @"";
+        id todo = style ? ((id (*)(id, SEL))objc_msgSend)(style, sel_registerName("todo")) : nil;
+        BOOL done = todo ? ((BOOL (*)(id, SEL))objc_msgSend)(todo, sel_registerName("done")) : NO;
+        NSUInteger indent = style ? ((NSUInteger (*)(id, SEL))objc_msgSend)(style, sel_registerName("indent")) : 0;
+        NSString *chunk = [fullText substringWithRange:effectiveRange];
+
+        if (currentUUID && [uuid isEqualToString:currentUUID]) {
+            // Same paragraph, accumulate text and runs
+            NSMutableDictionary *run = [NSMutableDictionary dictionary];
+            run[@"start"] = @(runOffsetInPara);
+            run[@"length"] = @(chunk.length);
+            id nsLink = attrs[@"NSLink"];
+            if (nsLink) run[@"link"] = [nsLink description];
+            id strikethrough = attrs[@"TTStrikethrough"];
+            if (strikethrough) run[@"strikethrough"] = @YES;
+            [currentRuns addObject:run];
+            [currentText appendString:chunk];
+            runOffsetInPara += chunk.length;
+        } else {
+            // New paragraph - emit previous
+            if (currentText.length > 0) {
+                emitParagraph(paragraphs, currentText, currentRuns,
+                    currentStyle, currentIndent, currentTodoDone, currentUUID);
+            }
+            currentText = [NSMutableString stringWithString:chunk];
+            currentRuns = [NSMutableArray array];
+            currentUUID = uuid;
+            currentStyle = styleNum;
+            currentTodoDone = done;
+            currentIndent = indent;
+            runOffsetInPara = 0;
+
+            NSMutableDictionary *run = [NSMutableDictionary dictionary];
+            run[@"start"] = @(0);
+            run[@"length"] = @(chunk.length);
+            id nsLink = attrs[@"NSLink"];
+            if (nsLink) run[@"link"] = [nsLink description];
+            id strikethrough = attrs[@"TTStrikethrough"];
+            if (strikethrough) run[@"strikethrough"] = @YES;
+            [currentRuns addObject:run];
+            runOffsetInPara = chunk.length;
+        }
+
+        idx = effectiveRange.location + effectiveRange.length;
+    }
+    // Emit last paragraph
+    if (currentText.length > 0) {
+        emitParagraph(paragraphs, currentText, currentRuns,
+            currentStyle, currentIndent, currentTodoDone, currentUUID);
+    }
+
+    return paragraphs;
+}
+
+// Render paragraph model as markdown
+static NSString *paraModelToMarkdown(NSArray *paragraphs) {
+    NSMutableString *output = [NSMutableString string];
+
+    for (NSUInteger i = 0; i < paragraphs.count; i++) {
+        NSDictionary *para = paragraphs[i];
+        NSInteger style = [para[@"style"] integerValue];
+        NSUInteger indent = [para[@"indent"] unsignedIntegerValue];
+        NSString *rawText = para[@"text"];
+
+        if (rawText.length == 0 && style == 3) {
+            // Empty body paragraph = blank line
+            if (i > 0) [output appendString:@"\n"];
+            continue;
+        }
+
+        // Build formatted text with inline runs
+        NSString *formattedText;
+        NSArray *runs = para[@"runs"];
+        if (runs && runs.count > 0) {
+            NSMutableString *fmt = [NSMutableString string];
+            for (NSDictionary *run in runs) {
+                NSUInteger start = [run[@"start"] unsignedIntegerValue];
+                NSUInteger len = [run[@"length"] unsignedIntegerValue];
+                // Clamp to rawText bounds
+                if (start >= rawText.length) continue;
+                if (start + len > rawText.length) len = rawText.length - start;
+                NSString *runText = [rawText substringWithRange:NSMakeRange(start, len)];
+                // Strip trailing newlines from run text
+                runText = [runText stringByTrimmingCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+                if (runText.length == 0) continue;
+
+                NSString *escaped = escapeMarkdown(runText);
+
+                // Apply link wrapping
+                if (run[@"link"]) {
+                    NSString *linkURL = run[@"link"];
+                    // If display text equals URL, output bare URL
+                    if ([runText isEqualToString:linkURL]) {
+                        escaped = linkURL;
+                    } else {
+                        escaped = [NSString stringWithFormat:@"[%@](%@)", escaped, linkURL];
+                    }
+                }
+                // Apply strikethrough wrapping
+                if ([run[@"strikethrough"] boolValue]) {
+                    escaped = [NSString stringWithFormat:@"~~%@~~", escaped];
+                }
+
+                [fmt appendString:escaped];
+            }
+            formattedText = fmt;
+        } else {
+            formattedText = escapeMarkdown(rawText);
+        }
+
+        // Build indent prefix
+        NSMutableString *indentStr = [NSMutableString string];
+        for (NSUInteger j = 0; j < indent; j++) [indentStr appendString:@"  "];
+
+        // Build line prefix based on style
+        NSString *line;
+        switch (style) {
+            case 0: // Title
+                line = [NSString stringWithFormat:@"# %@", formattedText];
+                break;
+            case 1: // Heading
+                line = [NSString stringWithFormat:@"## %@", formattedText];
+                break;
+            case 100: // Dash list
+                line = [NSString stringWithFormat:@"%@- %@", indentStr, formattedText];
+                break;
+            case 102: // Numbered list
+                line = [NSString stringWithFormat:@"%@1. %@", indentStr, formattedText];
+                break;
+            case 103: { // Checklist
+                BOOL checked = [para[@"todoChecked"] boolValue];
+                line = [NSString stringWithFormat:@"%@- [%@] %@", indentStr, checked ? @"x" : @" ", formattedText];
+                break;
+            }
+            default: { // Body (style 3)
+                // Escape line-prefix collisions for body paragraphs
+                if ([formattedText hasPrefix:@"# "] || [formattedText isEqualToString:@"#"]) {
+                    formattedText = [NSString stringWithFormat:@"\\%@", formattedText];
+                } else if ([formattedText hasPrefix:@"- "] || [formattedText isEqualToString:@"-"]) {
+                    formattedText = [NSString stringWithFormat:@"\\%@", formattedText];
+                } else if ([formattedText hasPrefix:@"> "] || [formattedText isEqualToString:@">"]) {
+                    formattedText = [NSString stringWithFormat:@"\\%@", formattedText];
+                } else {
+                    // Check for numbered list prefix: digit(s) followed by ". "
+                    NSRange dotRange = [formattedText rangeOfString:@". "];
+                    if (dotRange.location != NSNotFound && dotRange.location > 0) {
+                        BOOL allDigits = YES;
+                        for (NSUInteger d = 0; d < dotRange.location; d++) {
+                            unichar ch = [formattedText characterAtIndex:d];
+                            if (ch < '0' || ch > '9') { allDigits = NO; break; }
+                        }
+                        if (allDigits) {
+                            // Escape the period: "1. " -> "1\. "
+                            formattedText = [NSString stringWithFormat:@"%@\\%@",
+                                [formattedText substringToIndex:dotRange.location],
+                                [formattedText substringFromIndex:dotRange.location]];
+                        }
+                    }
+                }
+                line = formattedText;
+                break;
+            }
+        }
+
+        if (i > 0) [output appendString:@"\n"];
+        [output appendString:line];
+    }
+
+    return output;
+}
+
+static int cmdReadMarkdownNote(id note) {
+    NSArray *model = noteToParaModel(note);
+
+    // Skip leading empty paragraphs (from canonical leading \n)
+    NSMutableArray *filtered = [NSMutableArray array];
+    BOOL foundContent = NO;
+    for (NSDictionary *para in model) {
+        NSString *text = para[@"text"];
+        if (!foundContent && text.length == 0) continue;
+        foundContent = YES;
+        [filtered addObject:para];
+    }
+
+    NSString *markdown = paraModelToMarkdown(filtered);
+    printf("%s\n", [markdown UTF8String]);
+    return 0;
+}
+
+// Parse inline formatting markers from text, producing runs array and plain text
+// For Milestones 1-3: handles links, strikethrough only
+// Milestone 4 adds bold/italic/underline
+static void parseInlineFormatting(NSString *lineText, NSMutableString *outPlainText, NSMutableArray *outRuns) {
+    NSUInteger i = 0;
+    NSUInteger len = lineText.length;
+
+    while (i < len) {
+        unichar c = [lineText characterAtIndex:i];
+
+        // Check for strikethrough ~~text~~
+        if (c == '~' && i + 1 < len && [lineText characterAtIndex:i + 1] == '~') {
+            NSRange closeRange = [lineText rangeOfString:@"~~" options:0
+                range:NSMakeRange(i + 2, len - i - 2)];
+            if (closeRange.location != NSNotFound) {
+                NSString *inner = [lineText substringWithRange:NSMakeRange(i + 2, closeRange.location - i - 2)];
+                NSString *unescaped = unescapeMarkdown(inner);
+                NSUInteger start = outPlainText.length;
+                [outPlainText appendString:unescaped];
+                [outRuns addObject:[@{
+                    @"start": @(start),
+                    @"length": @(unescaped.length),
+                    @"strikethrough": @YES
+                } mutableCopy]];
+                i = closeRange.location + 2;
+                continue;
+            }
+        }
+
+        // Check for link [text](url)
+        if (c == '[') {
+            // Find closing ]
+            NSRange closeBracket = [lineText rangeOfString:@"](" options:0
+                range:NSMakeRange(i + 1, len - i - 1)];
+            if (closeBracket.location != NSNotFound) {
+                NSRange closeParen = [lineText rangeOfString:@")" options:0
+                    range:NSMakeRange(closeBracket.location + 2, len - closeBracket.location - 2)];
+                if (closeParen.location != NSNotFound) {
+                    NSString *displayText = [lineText substringWithRange:NSMakeRange(i + 1, closeBracket.location - i - 1)];
+                    NSString *urlStr = [lineText substringWithRange:NSMakeRange(closeBracket.location + 2, closeParen.location - closeBracket.location - 2)];
+
+                    // Validate link scheme
+                    NSURL *url = [NSURL URLWithString:urlStr];
+                    if (url && isAllowedLinkScheme(url)) {
+                        NSString *unescapedDisplay = unescapeMarkdown(displayText);
+                        NSUInteger start = outPlainText.length;
+                        [outPlainText appendString:unescapedDisplay];
+                        [outRuns addObject:[@{
+                            @"start": @(start),
+                            @"length": @(unescapedDisplay.length),
+                            @"link": urlStr
+                        } mutableCopy]];
+                        i = closeParen.location + 1;
+                        continue;
+                    } else if (url && !isAllowedLinkScheme(url)) {
+                        fprintf(stderr, "Warning: rejected link with scheme '%s': %s\n",
+                            [[url scheme] UTF8String], [urlStr UTF8String]);
+                        // Treat as literal text
+                        NSString *literal = [lineText substringWithRange:NSMakeRange(i, closeParen.location - i + 1)];
+                        NSString *unescaped = unescapeMarkdown(literal);
+                        NSUInteger start = outPlainText.length;
+                        [outPlainText appendString:unescaped];
+                        [outRuns addObject:[@{
+                            @"start": @(start),
+                            @"length": @(unescaped.length)
+                        } mutableCopy]];
+                        i = closeParen.location + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Check for <u>text</u> (underline)
+        if (c == '<' && i + 2 < len) {
+            NSString *rest = [lineText substringFromIndex:i];
+            if ([rest hasPrefix:@"<u>"]) {
+                NSRange closeTag = [lineText rangeOfString:@"</u>" options:0
+                    range:NSMakeRange(i + 3, len - i - 3)];
+                if (closeTag.location != NSNotFound) {
+                    NSString *inner = [lineText substringWithRange:NSMakeRange(i + 3, closeTag.location - i - 3)];
+                    NSString *unescaped = unescapeMarkdown(inner);
+                    NSUInteger start = outPlainText.length;
+                    [outPlainText appendString:unescaped];
+                    [outRuns addObject:[@{
+                        @"start": @(start),
+                        @"length": @(unescaped.length),
+                        @"underline": @YES
+                    } mutableCopy]];
+                    i = closeTag.location + 4;
+                    continue;
+                }
+            }
+        }
+
+        // Regular character - handle escapes
+        if (c == '\\' && i + 1 < len) {
+            unichar next = [lineText characterAtIndex:i + 1];
+            if (next == '*' || next == '_' || next == '~' || next == '[' || next == ']' ||
+                next == '(' || next == ')' || next == '\\' || next == '<' || next == '#' ||
+                next == '-' || next == '.' || next == '>') {
+                [outPlainText appendFormat:@"%C", next];
+                i += 2;
+                continue;
+            }
+        }
+
+        [outPlainText appendFormat:@"%C", c];
+        i++;
+    }
+
+    // If no runs were created, make a single run for the whole text
+    if (outRuns.count == 0 && outPlainText.length > 0) {
+        [outRuns addObject:[@{
+            @"start": @(0),
+            @"length": @(outPlainText.length)
+        } mutableCopy]];
+    }
+    // Fill gaps in runs (text between formatted runs)
+    // Not needed since we build runs sequentially
+}
+
+// Parse markdown text into paragraph model
+static NSArray *markdownToParaModel(NSString *markdown) {
+    // Normalize line endings
+    NSString *normalized = [markdown stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"];
+    normalized = [normalized stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
+
+    // Trim trailing newlines
+    while (normalized.length > 0 && [normalized characterAtIndex:normalized.length - 1] == '\n') {
+        normalized = [normalized substringToIndex:normalized.length - 1];
+    }
+
+    if (normalized.length == 0) return @[];
+
+    NSArray *lines = [normalized componentsSeparatedByString:@"\n"];
+    NSMutableArray *paragraphs = [NSMutableArray array];
+
+    for (NSString *line in lines) {
+        NSMutableDictionary *para = [NSMutableDictionary dictionary];
+        NSString *textContent = nil;
+        NSInteger style = 3;
+        NSUInteger indent = 0;
+        BOOL todoChecked = NO;
+
+        // Check for title: # Text
+        if ([line hasPrefix:@"# "]) {
+            style = 0;
+            textContent = [line substringFromIndex:2];
+        }
+        // Check for heading: ## Text
+        else if ([line hasPrefix:@"## "]) {
+            style = 1;
+            textContent = [line substringFromIndex:3];
+        }
+        // Check for list items (with possible indentation)
+        else {
+            // Count leading spaces for indent level
+            NSUInteger spaces = 0;
+            while (spaces < line.length && [line characterAtIndex:spaces] == ' ') spaces++;
+            indent = spaces / 2;
+            NSString *trimmedLine = (spaces > 0) ? [line substringFromIndex:spaces] : line;
+
+            // Checklist: - [ ] or - [x]
+            if ([trimmedLine hasPrefix:@"- [ ] "]) {
+                style = 103;
+                todoChecked = NO;
+                textContent = [trimmedLine substringFromIndex:6];
+            } else if ([trimmedLine hasPrefix:@"- [x] "]) {
+                style = 103;
+                todoChecked = YES;
+                textContent = [trimmedLine substringFromIndex:6];
+            }
+            // Dash list: - Text
+            else if ([trimmedLine hasPrefix:@"- "]) {
+                style = 100;
+                textContent = [trimmedLine substringFromIndex:2];
+            }
+            // Numbered list: digits followed by ". "
+            else if (trimmedLine.length > 2) {
+                NSUInteger digitEnd = 0;
+                while (digitEnd < trimmedLine.length) {
+                    unichar ch = [trimmedLine characterAtIndex:digitEnd];
+                    if (ch < '0' || ch > '9') break;
+                    digitEnd++;
+                }
+                if (digitEnd > 0 && digitEnd + 1 < trimmedLine.length &&
+                    [trimmedLine characterAtIndex:digitEnd] == '.' &&
+                    [trimmedLine characterAtIndex:digitEnd + 1] == ' ') {
+                    style = 102;
+                    textContent = [trimmedLine substringFromIndex:digitEnd + 2];
+                } else {
+                    style = 3;
+                    indent = 0; // Body doesn't use indent
+                    textContent = line;
+                }
+            } else {
+                style = 3;
+                indent = 0;
+                textContent = line;
+            }
+        }
+
+        // For body text, unescape line-prefix escapes
+        if (style == 3 && textContent.length > 0) {
+            if ([textContent hasPrefix:@"\\# "]) {
+                textContent = [textContent substringFromIndex:1];
+            } else if ([textContent hasPrefix:@"\\- "]) {
+                textContent = [textContent substringFromIndex:1];
+            } else if ([textContent hasPrefix:@"\\> "]) {
+                textContent = [textContent substringFromIndex:1];
+            } else {
+                // Check for escaped numbered list prefix: "1\. "
+                NSRange bsRange = [textContent rangeOfString:@"\\."];
+                if (bsRange.location != NSNotFound && bsRange.location > 0) {
+                    BOOL allDigits = YES;
+                    for (NSUInteger d = 0; d < bsRange.location; d++) {
+                        unichar ch = [textContent characterAtIndex:d];
+                        if (ch < '0' || ch > '9') { allDigits = NO; break; }
+                    }
+                    if (allDigits) {
+                        // Remove the backslash: "1\. " -> "1. "
+                        textContent = [NSString stringWithFormat:@"%@%@",
+                            [textContent substringToIndex:bsRange.location],
+                            [textContent substringFromIndex:bsRange.location + 1]];
+                    }
+                }
+            }
+        }
+
+        // Parse inline formatting
+        NSMutableString *plainText = [NSMutableString string];
+        NSMutableArray *runs = [NSMutableArray array];
+        parseInlineFormatting(textContent ?: @"", plainText, runs);
+
+        para[@"style"] = @(style);
+        para[@"indent"] = @(indent);
+        para[@"text"] = [plainText copy];
+        if (style == 103) para[@"todoChecked"] = @(todoChecked);
+        if (runs.count > 0) para[@"runs"] = runs;
+        [paragraphs addObject:para];
+    }
+
+    return paragraphs;
+}
+
+// --- Diff Engine ---
+
+// Paragraph signature for LCS matching
+static NSString *paraSignature(NSDictionary *para) {
+    NSString *text = normalizeParaText(para[@"text"]);
+    return [NSString stringWithFormat:@"%@|%@|%@|%@",
+        para[@"style"], para[@"indent"],
+        ([para[@"style"] integerValue] == 103) ? para[@"todoChecked"] : @"",
+        text];
+}
+
+// Compare inline runs for equality
+static BOOL inlineRunsEqual(NSArray *a, NSArray *b) {
+    if (!a && !b) return YES;
+    if (!a || !b) return a.count == 0 || b.count == 0;
+    if (a.count != b.count) return NO;
+    for (NSUInteger i = 0; i < a.count; i++) {
+        NSDictionary *ra = a[i];
+        NSDictionary *rb = b[i];
+        if (![ra[@"start"] isEqual:rb[@"start"]]) return NO;
+        if (![ra[@"length"] isEqual:rb[@"length"]]) return NO;
+        if (![ra[@"link"] isEqual:rb[@"link"]] &&
+            !(ra[@"link"] == nil && rb[@"link"] == nil)) return NO;
+        if ([ra[@"strikethrough"] boolValue] != [rb[@"strikethrough"] boolValue]) return NO;
+    }
+    return YES;
+}
+
+// Compare two paragraphs for equality (ignoring UUID)
+static BOOL paragraphsEqual(NSDictionary *a, NSDictionary *b) {
+    if (![a[@"style"] isEqual:b[@"style"]]) return NO;
+    if (![a[@"indent"] isEqual:b[@"indent"]]) return NO;
+    if ([a[@"style"] integerValue] == 103) {
+        if ([a[@"todoChecked"] boolValue] != [b[@"todoChecked"] boolValue]) return NO;
+    }
+    if (![normalizeParaText(a[@"text"]) isEqualToString:normalizeParaText(b[@"text"])]) return NO;
+    return inlineRunsEqual(a[@"runs"], b[@"runs"]);
+}
+
+// LCS algorithm over paragraph signatures
+static NSArray *computeLCS(NSArray *oldSigs, NSArray *newSigs) {
+    NSUInteger m = oldSigs.count;
+    NSUInteger n = newSigs.count;
+
+    // DP table
+    NSUInteger **dp = calloc(m + 1, sizeof(NSUInteger *));
+    for (NSUInteger i = 0; i <= m; i++) dp[i] = calloc(n + 1, sizeof(NSUInteger));
+
+    for (NSUInteger i = 1; i <= m; i++) {
+        for (NSUInteger j = 1; j <= n; j++) {
+            if ([oldSigs[i-1] isEqualToString:newSigs[j-1]]) {
+                dp[i][j] = dp[i-1][j-1] + 1;
+            } else {
+                dp[i][j] = MAX(dp[i-1][j], dp[i][j-1]);
+            }
+        }
+    }
+
+    // Backtrack to find matched pairs (oldIndex, newIndex)
+    NSMutableArray *pairs = [NSMutableArray array];
+    NSUInteger i = m, j = n;
+    while (i > 0 && j > 0) {
+        if ([oldSigs[i-1] isEqualToString:newSigs[j-1]]) {
+            [pairs insertObject:@[@(i-1), @(j-1)] atIndex:0];
+            i--; j--;
+        } else if (dp[i-1][j] >= dp[i][j-1]) {
+            i--;
+        } else {
+            j--;
+        }
+    }
+
+    for (NSUInteger k = 0; k <= m; k++) free(dp[k]);
+    free(dp);
+
+    return pairs;
+}
+
+// Compute character offsets for each paragraph in the note's mergeableString
+static NSArray *computeParaOffsets(id note) {
+    NSAttributedString *attrStr = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attributedString"));
+    NSString *fullText = [attrStr string];
+    NSUInteger length = fullText.length;
+
+    if (length == 0) return @[];
+
+    NSMutableArray *offsets = [NSMutableArray array];
+    NSUInteger paraStart = 0;
+    for (NSUInteger i = 0; i <= length; i++) {
+        if (i == length || [fullText characterAtIndex:i] == '\n') {
+            [offsets addObject:@[@(paraStart), @(i - paraStart)]];
+            paraStart = i + 1;
+        }
+    }
+
+    return offsets;
+}
+
+static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdown, BOOL dryRun, BOOL backup) {
+    // Get note identifier
+    NSString *identifier = noteToDict(note)[@"id"];
+
+    // Build old and new paragraph models
+    NSArray *oldModel = noteToParaModel(note);
+    NSArray *newModel = markdownToParaModel(markdown);
+
+    // Filter out leading empty paragraphs from old model (canonical leading \n)
+    NSMutableArray *filteredOld = [NSMutableArray array];
+    BOOL foundContent = NO;
+    for (NSDictionary *para in oldModel) {
+        NSString *text = para[@"text"];
+        if (!foundContent && text.length == 0) continue;
+        foundContent = YES;
+        [filteredOld addObject:para];
+    }
+
+    // Build signatures
+    NSMutableArray *oldSigs = [NSMutableArray array];
+    for (NSDictionary *p in filteredOld) [oldSigs addObject:paraSignature(p)];
+    NSMutableArray *newSigs = [NSMutableArray array];
+    for (NSDictionary *p in newModel) [newSigs addObject:paraSignature(p)];
+
+    // Compute LCS
+    NSArray *lcsPairs = computeLCS(oldSigs, newSigs);
+
+    // Build mutation list
+    NSMutableArray *mutations = [NSMutableArray array];
+    NSMutableSet *matchedOld = [NSMutableSet set];
+    NSMutableSet *matchedNew = [NSMutableSet set];
+
+    for (NSArray *pair in lcsPairs) {
+        [matchedOld addObject:pair[0]];
+        [matchedNew addObject:pair[1]];
+    }
+
+    // Identify deletions (in old but not matched)
+    for (NSUInteger i = 0; i < filteredOld.count; i++) {
+        if (![matchedOld containsObject:@(i)]) {
+            [mutations addObject:@{@"type": @"delete", @"oldIndex": @(i),
+                @"oldText": filteredOld[i][@"text"]}];
+        }
+    }
+
+    // Identify insertions (in new but not matched) and modifications (matched but changed)
+    NSUInteger pairIdx = 0;
+    for (NSUInteger j = 0; j < newModel.count; j++) {
+        if ([matchedNew containsObject:@(j)]) {
+            // Find the corresponding pair
+            NSArray *pair = nil;
+            for (NSArray *p in lcsPairs) {
+                if ([p[1] isEqual:@(j)]) { pair = p; break; }
+            }
+            NSUInteger oldIdx = [pair[0] unsignedIntegerValue];
+            // Check if the matched pair actually differs in some way
+            if (!paragraphsEqual(filteredOld[oldIdx], newModel[j])) {
+                [mutations addObject:@{@"type": @"modify", @"oldIndex": @(oldIdx),
+                    @"newIndex": @(j), @"oldText": filteredOld[oldIdx][@"text"],
+                    @"newText": newModel[j][@"text"]}];
+            }
+        } else {
+            // Insert - figure out where to insert (after the last matched old index before this)
+            NSInteger insertAfterOld = -1;
+            for (NSArray *p in lcsPairs) {
+                if ([p[1] unsignedIntegerValue] < j) {
+                    insertAfterOld = [p[0] integerValue];
+                }
+            }
+            [mutations addObject:@{@"type": @"insert", @"insertAfterOld": @(insertAfterOld),
+                @"newIndex": @(j), @"text": newModel[j][@"text"]}];
+        }
+    }
+
+    // Summary counts
+    NSUInteger unchanged = 0, modified = 0, inserted = 0, deleted = 0;
+    for (NSDictionary *m in mutations) {
+        if ([m[@"type"] isEqualToString:@"delete"]) deleted++;
+        else if ([m[@"type"] isEqualToString:@"insert"]) inserted++;
+        else if ([m[@"type"] isEqualToString:@"modify"]) modified++;
+    }
+    unchanged = filteredOld.count - deleted - modified;
+
+    // Build output JSON
+    NSMutableDictionary *summary = [NSMutableDictionary dictionary];
+    summary[@"id"] = identifier;
+    summary[@"paragraphsUnchanged"] = @(unchanged);
+    summary[@"paragraphsModified"] = @(modified);
+    summary[@"paragraphsInserted"] = @(inserted);
+    summary[@"paragraphsDeleted"] = @(deleted);
+    summary[@"mutations"] = mutations;
+
+    if (dryRun) {
+        printJSON(summary);
+        return 0;
+    }
+
+    // No mutations needed
+    if (mutations.count == 0) {
+        printJSON(summary);
+        return 0;
+    }
+
+    // Backup if requested
+    if (backup) {
+        NSString *title = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("title"));
+        NSString *backupTitle = [NSString stringWithFormat:@"[backup] %@", title ?: @"Untitled"];
+        cmdDuplicate(viewContext, identifier, backupTitle);
+        // Re-fetch note after duplicate
+        note = findNoteByID(viewContext, identifier);
+    }
+
+    // Apply mutations directly to the mergeableString
+    id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+    id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+    NSAttributedString *attrStr = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attributedString"));
+    NSString *fullText = [attrStr string];
+    NSUInteger msLen = ((NSUInteger (*)(id, SEL))objc_msgSend)(ms, sel_registerName("length"));
+
+    // Compute paragraph offsets in the full text
+    // Each paragraph is separated by \n
+    NSMutableArray *paraRanges = [NSMutableArray array]; // NSRange as @[@(loc), @(len)]
+    {
+        NSUInteger paraStart = 0;
+        for (NSUInteger i = 0; i <= fullText.length; i++) {
+            if (i == fullText.length || [fullText characterAtIndex:i] == '\n') {
+                [paraRanges addObject:@[@(paraStart), @(i - paraStart)]];
+                paraStart = i + 1;
+            }
+        }
+    }
+
+    // Map filteredOld indices to paraRange indices
+    // The filteredOld skips leading empty paragraphs, so we need to find the offset
+    NSUInteger leadingSkipped = oldModel.count - filteredOld.count;
+    // Verify: leading paragraphs in oldModel that were skipped
+    // Actually, let's count them properly
+    leadingSkipped = 0;
+    foundContent = NO;
+    for (NSUInteger i = 0; i < oldModel.count; i++) {
+        NSString *text = oldModel[i][@"text"];
+        if (!foundContent && text.length == 0) {
+            leadingSkipped++;
+            continue;
+        }
+        foundContent = YES;
+    }
+
+    ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("beginEditing"));
+
+    // Build a unified operation list, ordered by position descending (bottom to top).
+    // Processing bottom-to-top means each op uses original offsets (ops above are unaffected).
+    NSMutableArray *ops = [NSMutableArray array]; // each op: {position, type, ...}
+
+    for (NSDictionary *m in mutations) {
+        if ([m[@"type"] isEqualToString:@"delete"]) {
+            NSUInteger oldIdx = [m[@"oldIndex"] unsignedIntegerValue];
+            NSUInteger paraIdx = oldIdx + leadingSkipped;
+            if (paraIdx >= paraRanges.count) continue;
+            NSUInteger paraStart = [paraRanges[paraIdx][0] unsignedIntegerValue];
+            NSUInteger paraLen = [paraRanges[paraIdx][1] unsignedIntegerValue];
+            // Include trailing newline
+            NSUInteger deleteStart = paraStart;
+            NSUInteger deleteLen = paraLen;
+            if (deleteStart + deleteLen < fullText.length) {
+                deleteLen++; // trailing \n
+            } else if (deleteStart > 0) {
+                deleteStart--; // preceding \n for last paragraph
+                deleteLen++;
+            }
+            [ops addObject:@{@"op": @"delete", @"pos": @(deleteStart), @"len": @(deleteLen)}];
+        }
+        else if ([m[@"type"] isEqualToString:@"modify"]) {
+            NSUInteger oldIdx = [m[@"oldIndex"] unsignedIntegerValue];
+            NSUInteger newIdx = [m[@"newIndex"] unsignedIntegerValue];
+            NSUInteger paraIdx = oldIdx + leadingSkipped;
+            if (paraIdx >= paraRanges.count) continue;
+            NSUInteger paraStart = [paraRanges[paraIdx][0] unsignedIntegerValue];
+            NSUInteger paraLen = [paraRanges[paraIdx][1] unsignedIntegerValue];
+            [ops addObject:@{@"op": @"modify", @"pos": @(paraStart), @"len": @(paraLen),
+                @"newPara": newModel[newIdx], @"oldPara": filteredOld[oldIdx]}];
+        }
+        else if ([m[@"type"] isEqualToString:@"insert"]) {
+            NSInteger insertAfterOld = [m[@"insertAfterOld"] integerValue];
+            NSUInteger newIdx = [m[@"newIndex"] unsignedIntegerValue];
+            NSUInteger insertPos;
+            if (insertAfterOld < 0) {
+                if (leadingSkipped > 0 && paraRanges.count > leadingSkipped) {
+                    insertPos = [paraRanges[leadingSkipped][0] unsignedIntegerValue];
+                } else if (paraRanges.count > 0) {
+                    // Insert after the first paragraph (title)
+                    NSUInteger pStart = [paraRanges[0][0] unsignedIntegerValue];
+                    NSUInteger pLen = [paraRanges[0][1] unsignedIntegerValue];
+                    insertPos = pStart + pLen + 1;
+                    if (insertPos > fullText.length) insertPos = fullText.length;
+                } else {
+                    insertPos = 0;
+                }
+            } else {
+                NSUInteger paraIdx = (NSUInteger)insertAfterOld + leadingSkipped;
+                if (paraIdx < paraRanges.count) {
+                    NSUInteger pStart = [paraRanges[paraIdx][0] unsignedIntegerValue];
+                    NSUInteger pLen = [paraRanges[paraIdx][1] unsignedIntegerValue];
+                    insertPos = pStart + pLen + 1;
+                    if (insertPos > fullText.length) insertPos = fullText.length;
+                } else {
+                    insertPos = fullText.length;
+                }
+            }
+            [ops addObject:@{@"op": @"insert", @"pos": @(insertPos), @"newPara": newModel[newIdx]}];
+        }
+    }
+
+    // Sort operations by position descending (bottom to top)
+    // For same position: delete before insert (delete first to avoid shifting insert targets)
+    [ops sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        NSComparisonResult cmp = [b[@"pos"] compare:a[@"pos"]];
+        if (cmp != NSOrderedSame) return cmp;
+        // At same position: deletes before inserts (delete removes old content first)
+        int prioA = [a[@"op"] isEqualToString:@"delete"] ? 0 : ([a[@"op"] isEqualToString:@"modify"] ? 1 : 2);
+        int prioB = [b[@"op"] isEqualToString:@"delete"] ? 0 : ([b[@"op"] isEqualToString:@"modify"] ? 1 : 2);
+        return prioA < prioB ? NSOrderedAscending : (prioA > prioB ? NSOrderedDescending : NSOrderedSame);
+    }];
+
+    NSInteger cumulativeDelta = 0;
+    for (NSDictionary *op in ops) {
+        NSString *opType = op[@"op"];
+        NSUInteger pos = [op[@"pos"] unsignedIntegerValue];
+
+        if ([opType isEqualToString:@"delete"]) {
+            NSUInteger deleteLen = [op[@"len"] unsignedIntegerValue];
+            ((void (*)(id, SEL, NSRange))objc_msgSend)(ms, sel_registerName("deleteCharactersInRange:"),
+                NSMakeRange(pos, deleteLen));
+            cumulativeDelta -= (NSInteger)deleteLen;
+        }
+        else if ([opType isEqualToString:@"modify"]) {
+            NSDictionary *newPara = op[@"newPara"];
+            NSDictionary *oldPara = op[@"oldPara"];
+            NSUInteger paraLen = [op[@"len"] unsignedIntegerValue];
+            NSString *newText = newPara[@"text"];
+            NSString *oldText = oldPara[@"text"];
+
+            if (![normalizeParaText(oldText) isEqualToString:normalizeParaText(newText)]) {
+                ((void (*)(id, SEL, NSRange))objc_msgSend)(ms, sel_registerName("deleteCharactersInRange:"),
+                    NSMakeRange(pos, paraLen));
+                ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"),
+                    newText, pos);
+                cumulativeDelta += (NSInteger)newText.length - (NSInteger)paraLen;
+                paraLen = newText.length;
+            }
+
+            // Patch attributes
+            NSUInteger currentMsLen = (NSUInteger)((NSInteger)msLen + cumulativeDelta);
+            if (pos < currentMsLen && paraLen > 0) {
+                NSRange effectiveRange;
+                NSDictionary *existingAttrs = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                    ms, sel_registerName("attributesAtIndex:effectiveRange:"), pos, &effectiveRange);
+
+                NSMutableDictionary *patchedAttrs = [existingAttrs mutableCopy];
+                if (!patchedAttrs) patchedAttrs = [NSMutableDictionary dictionary];
+
+                NSInteger newStyle = [newPara[@"style"] integerValue];
+                NSUInteger newIndent = [newPara[@"indent"] unsignedIntegerValue];
+                id existingStyle = existingAttrs[@"TTStyle"];
+
+                id patchedStyle = existingStyle ? [existingStyle mutableCopy] : nil;
+                if (!patchedStyle) patchedStyle = [[ICTTParagraphStyleClass alloc] init];
+
+                ((void (*)(id, SEL, NSUInteger))objc_msgSend)(patchedStyle, sel_registerName("setStyle:"), (NSUInteger)newStyle);
+                ((void (*)(id, SEL, NSUInteger))objc_msgSend)(patchedStyle, sel_registerName("setIndent:"), newIndent);
+
+                if (newStyle == 103) {
+                    BOOL checked = [newPara[@"todoChecked"] boolValue];
+                    id todo = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
+                        [ICTTTodoClass alloc], sel_registerName("initWithIdentifier:done:"), [NSUUID UUID], checked);
+                    ((void (*)(id, SEL, id))objc_msgSend)(patchedStyle, sel_registerName("setTodo:"), todo);
+                }
+
+                patchedAttrs[@"TTStyle"] = patchedStyle;
+                [patchedAttrs removeObjectForKey:@"NSLink"];
+                [patchedAttrs removeObjectForKey:@"TTStrikethrough"];
+
+                ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
+                    patchedAttrs, NSMakeRange(pos, paraLen));
+
+                NSArray *newRuns = newPara[@"runs"];
+                if (newRuns) {
+                    for (NSDictionary *run in newRuns) {
+                        NSUInteger runStart = [run[@"start"] unsignedIntegerValue];
+                        NSUInteger runLen = [run[@"length"] unsignedIntegerValue];
+                        if (runStart + runLen > paraLen) continue;
+                        NSMutableDictionary *runAttrs = [patchedAttrs mutableCopy];
+                        if (run[@"link"]) {
+                            NSURL *linkURL = [NSURL URLWithString:run[@"link"]];
+                            if (linkURL) runAttrs[@"NSLink"] = linkURL;
+                        }
+                        if ([run[@"strikethrough"] boolValue]) runAttrs[@"TTStrikethrough"] = @1;
+                        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
+                            runAttrs, NSMakeRange(pos + runStart, runLen));
+                    }
+                }
+            }
+        }
+        else if ([opType isEqualToString:@"insert"]) {
+            NSDictionary *newPara = op[@"newPara"];
+            NSString *newText = newPara[@"text"];
+            NSString *toInsert = [NSString stringWithFormat:@"%@\n", newText];
+
+            ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"),
+                toInsert, pos);
+
+            NSInteger newStyle = [newPara[@"style"] integerValue];
+            NSUInteger newIndent = [newPara[@"indent"] unsignedIntegerValue];
+
+            id paraStyle = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(paraStyle, sel_registerName("setStyle:"), (NSUInteger)newStyle);
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(paraStyle, sel_registerName("setIndent:"), newIndent);
+
+            if (newStyle == 103) {
+                BOOL checked = [newPara[@"todoChecked"] boolValue];
+                id todo = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
+                    [ICTTTodoClass alloc], sel_registerName("initWithIdentifier:done:"), [NSUUID UUID], checked);
+                ((void (*)(id, SEL, id))objc_msgSend)(paraStyle, sel_registerName("setTodo:"), todo);
+            }
+
+            NSMutableDictionary *attrs = [NSMutableDictionary dictionary];
+            attrs[@"TTStyle"] = paraStyle;
+
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
+                attrs, NSMakeRange(pos, toInsert.length));
+
+            NSArray *newRuns = newPara[@"runs"];
+            if (newRuns) {
+                for (NSDictionary *run in newRuns) {
+                    NSUInteger runStart = [run[@"start"] unsignedIntegerValue];
+                    NSUInteger runLen = [run[@"length"] unsignedIntegerValue];
+                    if (runStart + runLen > newText.length) continue;
+                    NSMutableDictionary *runAttrs = [attrs mutableCopy];
+                    if (run[@"link"]) {
+                        NSURL *linkURL = [NSURL URLWithString:run[@"link"]];
+                        if (linkURL) runAttrs[@"NSLink"] = linkURL;
+                    }
+                    if ([run[@"strikethrough"] boolValue]) runAttrs[@"TTStrikethrough"] = @1;
+                    ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
+                        runAttrs, NSMakeRange(pos + runStart, runLen));
+                }
+            }
+
+            cumulativeDelta += (NSInteger)toInsert.length;
+        }
+    }
+
+    // Save
+    NSUInteger newLen = (NSUInteger)((NSInteger)msLen + cumulativeDelta);
+    ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+        note, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, newLen), cumulativeDelta);
+    ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("endEditing"));
+    ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("saveNoteData"));
+    NSError *error = nil;
+    [viewContext save:&error];
+    if (error) {
+        errorExit([NSString stringWithFormat:@"Save error: %@", error]);
+    }
+
+    printJSON(summary);
+    return 0;
+}
+
+static int cmdWriteMarkdownNote(id note, id viewContext, BOOL dryRun, BOOL backup) {
+    // Read markdown from stdin
+    NSFileHandle *input = [NSFileHandle fileHandleWithStandardInput];
+    NSData *data = [input readDataToEndOfFile];
+    NSString *markdown = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (!markdown) errorExit(@"Failed to read markdown from stdin (invalid UTF-8)");
+    return cmdWriteMarkdownWithString(note, viewContext, markdown, dryRun, backup);
 }
 
 
@@ -2463,6 +3510,761 @@ static int cmdTest(id viewContext) {
         [viewContext save:nil];
     }
 
+    // --- Markdown Tests ---
+
+    // Test: read-markdown basic (title + body)
+    fprintf(stderr, "Test: read-markdown basic...\n");
+    {
+        NSString *mdTitle = @"__md_test_basic__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        NSString *mdContent = [NSString stringWithFormat:@"%@\nBody text here", mdTitle];
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdContent, 0);
+        id mdTitleStyle = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(mdTitleStyle, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": mdTitleStyle}, NSMakeRange(0, mdTitle.length + 1));
+        id mdBodyStyle = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(mdBodyStyle, sel_registerName("setStyle:"), 3);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": mdBodyStyle}, NSMakeRange(mdTitle.length + 1, 14));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        // Read as markdown via paraModel
+        NSArray *model = noteToParaModel(mdNote);
+        NSMutableArray *filtered = [NSMutableArray array];
+        BOOL fc = NO;
+        for (NSDictionary *p in model) {
+            if (!fc && [p[@"text"] length] == 0) continue;
+            fc = YES;
+            [filtered addObject:p];
+        }
+        NSString *markdown = paraModelToMarkdown(filtered);
+        BOOL hasTitleMd = [markdown hasPrefix:@"# "];
+        BOOL hasBody = [markdown containsString:@"Body text here"];
+        if (hasTitleMd && hasBody) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
+
+        deleteNote(mdNote, viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: read-markdown heading
+    fprintf(stderr, "Test: read-markdown heading...\n");
+    {
+        NSString *mdTitle = @"__md_test_heading__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        NSString *mdContent = [NSString stringWithFormat:@"%@\nMy Heading", mdTitle];
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdContent, 0);
+        id s0 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length + 1));
+        id s1 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s1, sel_registerName("setStyle:"), 1);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s1}, NSMakeRange(mdTitle.length + 1, 10));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSArray *model = noteToParaModel(mdNote);
+        NSMutableArray *filtered = [NSMutableArray array];
+        BOOL fc = NO;
+        for (NSDictionary *p in model) {
+            if (!fc && [p[@"text"] length] == 0) continue;
+            fc = YES;
+            [filtered addObject:p];
+        }
+        NSString *markdown = paraModelToMarkdown(filtered);
+        if ([markdown containsString:@"## My Heading"]) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
+
+        deleteNote(mdNote, viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: read-markdown dash list
+    fprintf(stderr, "Test: read-markdown dash list...\n");
+    {
+        NSString *mdTitle = @"__md_test_dash__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdTitle, 0);
+        id s0 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdTitle.length), mdTitle.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSString *mdNoteID = noteToDict(mdNote)[@"id"];
+        cmdAppend(viewContext, mdNoteID, @"Dash item", 100);
+
+        mdNote = findNoteByID(viewContext, mdNoteID);
+        NSArray *model = noteToParaModel(mdNote);
+        NSMutableArray *filtered = [NSMutableArray array];
+        BOOL fc = NO;
+        for (NSDictionary *p in model) {
+            if (!fc && [p[@"text"] length] == 0) continue;
+            fc = YES;
+            [filtered addObject:p];
+        }
+        NSString *markdown = paraModelToMarkdown(filtered);
+        if ([markdown containsString:@"- Dash item"]) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
+
+        deleteNote(findNoteByID(viewContext, mdNoteID), viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: read-markdown numbered list
+    fprintf(stderr, "Test: read-markdown numbered list...\n");
+    {
+        NSString *mdTitle = @"__md_test_num__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdTitle, 0);
+        id s0 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdTitle.length), mdTitle.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSString *mdNoteID = noteToDict(mdNote)[@"id"];
+        cmdAppend(viewContext, mdNoteID, @"Numbered item", 102);
+
+        mdNote = findNoteByID(viewContext, mdNoteID);
+        NSArray *model = noteToParaModel(mdNote);
+        NSMutableArray *filtered = [NSMutableArray array];
+        BOOL fc = NO;
+        for (NSDictionary *p in model) {
+            if (!fc && [p[@"text"] length] == 0) continue;
+            fc = YES;
+            [filtered addObject:p];
+        }
+        NSString *markdown = paraModelToMarkdown(filtered);
+        if ([markdown containsString:@"1. Numbered item"]) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
+
+        deleteNote(findNoteByID(viewContext, mdNoteID), viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: read-markdown checklist
+    fprintf(stderr, "Test: read-markdown checklist...\n");
+    {
+        NSString *mdTitle = @"__md_test_check__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        NSString *mdContent = [NSString stringWithFormat:@"%@\nUnchecked item\nChecked item", mdTitle];
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdContent, 0);
+        // Title style
+        id s0 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length + 1));
+        // Unchecked checklist
+        id s103a = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s103a, sel_registerName("setStyle:"), 103);
+        id todoA = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
+            [ICTTTodoClass alloc], sel_registerName("initWithIdentifier:done:"), [NSUUID UUID], NO);
+        ((void (*)(id, SEL, id))objc_msgSend)(s103a, sel_registerName("setTodo:"), todoA);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s103a}, NSMakeRange(mdTitle.length + 1, 15));
+        // Checked checklist
+        id s103b = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s103b, sel_registerName("setStyle:"), 103);
+        id todoB = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
+            [ICTTTodoClass alloc], sel_registerName("initWithIdentifier:done:"), [NSUUID UUID], YES);
+        ((void (*)(id, SEL, id))objc_msgSend)(s103b, sel_registerName("setTodo:"), todoB);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s103b}, NSMakeRange(mdTitle.length + 16, 12));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSArray *model = noteToParaModel(mdNote);
+        NSMutableArray *filtered = [NSMutableArray array];
+        BOOL fc = NO;
+        for (NSDictionary *p in model) {
+            if (!fc && [p[@"text"] length] == 0) continue;
+            fc = YES;
+            [filtered addObject:p];
+        }
+        NSString *markdown = paraModelToMarkdown(filtered);
+        BOOL hasUnchecked = [markdown containsString:@"- [ ] Unchecked item"];
+        BOOL hasChecked = [markdown containsString:@"- [x] Checked item"];
+        if (hasUnchecked && hasChecked) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
+
+        deleteNote(mdNote, viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: read-markdown with link
+    fprintf(stderr, "Test: read-markdown link...\n");
+    {
+        NSString *mdTitle = @"__md_test_link__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        NSString *mdContent = [NSString stringWithFormat:@"%@\nClick here", mdTitle];
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdContent, 0);
+        id s0 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length + 1));
+        id s3 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3, sel_registerName("setStyle:"), 3);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            (@{@"TTStyle": s3, @"NSLink": [NSURL URLWithString:@"https://example.com"]}),
+            NSMakeRange(mdTitle.length + 1, 10));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSArray *model = noteToParaModel(mdNote);
+        NSMutableArray *filtered = [NSMutableArray array];
+        BOOL fc = NO;
+        for (NSDictionary *p in model) {
+            if (!fc && [p[@"text"] length] == 0) continue;
+            fc = YES;
+            [filtered addObject:p];
+        }
+        NSString *markdown = paraModelToMarkdown(filtered);
+        if ([markdown containsString:@"[Click here](https://example.com)"]) {
+            fprintf(stderr, "  PASS\n"); passed++;
+        } else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
+
+        deleteNote(mdNote, viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: read-markdown with strikethrough
+    fprintf(stderr, "Test: read-markdown strikethrough...\n");
+    {
+        NSString *mdTitle = @"__md_test_strike__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        NSString *mdContent = [NSString stringWithFormat:@"%@\nStruck text", mdTitle];
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdContent, 0);
+        id s0 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length + 1));
+        id s3 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3, sel_registerName("setStyle:"), 3);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            (@{@"TTStyle": s3, @"TTStrikethrough": @1}),
+            NSMakeRange(mdTitle.length + 1, 11));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSArray *model = noteToParaModel(mdNote);
+        NSMutableArray *filtered = [NSMutableArray array];
+        BOOL fc = NO;
+        for (NSDictionary *p in model) {
+            if (!fc && [p[@"text"] length] == 0) continue;
+            fc = YES;
+            [filtered addObject:p];
+        }
+        NSString *markdown = paraModelToMarkdown(filtered);
+        if ([markdown containsString:@"~~Struck text~~"]) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
+
+        deleteNote(mdNote, viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: markdown escape/unescape round-trip
+    fprintf(stderr, "Test: markdown escape round-trip...\n");
+    {
+        NSString *original = @"Hello *world* [link](url) ~~strike~~ <tag> back\\slash";
+        NSString *escaped = escapeMarkdown(original);
+        NSString *unescaped = unescapeMarkdown(escaped);
+        if ([original isEqualToString:unescaped]) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (orig: %s, unescaped: %s)\n", [original UTF8String], [unescaped UTF8String]); failed++; }
+    }
+
+    // Test: markdown parser round-trip
+    fprintf(stderr, "Test: markdown parser round-trip...\n");
+    {
+        NSString *mdTitle = @"__md_test_roundtrip__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        NSString *mdContent = [NSString stringWithFormat:@"%@\nBody line 1\nBody line 2", mdTitle];
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdContent, 0);
+        id s0 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length + 1));
+        id s3 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3, sel_registerName("setStyle:"), 3);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s3}, NSMakeRange(mdTitle.length + 1, mdContent.length - mdTitle.length - 1));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        // Read as markdown
+        NSArray *model = noteToParaModel(mdNote);
+        NSMutableArray *filtered = [NSMutableArray array];
+        BOOL fc = NO;
+        for (NSDictionary *p in model) {
+            if (!fc && [p[@"text"] length] == 0) continue;
+            fc = YES;
+            [filtered addObject:p];
+        }
+        NSString *markdown = paraModelToMarkdown(filtered);
+        // Parse back
+        NSArray *parsed = markdownToParaModel(markdown);
+        // Compare models
+        BOOL match = (filtered.count == parsed.count);
+        if (match) {
+            for (NSUInteger pi = 0; pi < filtered.count; pi++) {
+                NSDictionary *orig = filtered[pi];
+                NSDictionary *back = parsed[pi];
+                if (![orig[@"style"] isEqual:back[@"style"]] ||
+                    ![normalizeParaText(orig[@"text"]) isEqualToString:normalizeParaText(back[@"text"])]) {
+                    match = NO;
+                    fprintf(stderr, "    Mismatch at para %lu: style %s vs %s, text '%s' vs '%s'\n",
+                        (unsigned long)pi, [[orig[@"style"] description] UTF8String],
+                        [[back[@"style"] description] UTF8String],
+                        [orig[@"text"] UTF8String], [back[@"text"] UTF8String]);
+                    break;
+                }
+            }
+        }
+        if (match) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (count: %lu vs %lu)\n", (unsigned long)filtered.count, (unsigned long)parsed.count); failed++; }
+
+        deleteNote(mdNote, viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: write-markdown no-change round-trip (subprocess)
+    fprintf(stderr, "Test: write-markdown no-change round-trip...\n");
+    {
+        NSString *mdTitle = @"__md_test_nochange__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        NSString *mdContent = [NSString stringWithFormat:@"%@\nKeep this line\nAnd this one", mdTitle];
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdContent, 0);
+        id s0 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length + 1));
+        id s3 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3, sel_registerName("setStyle:"), 3);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s3}, NSMakeRange(mdTitle.length + 1, mdContent.length - mdTitle.length - 1));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSString *mdNoteID = noteToDict(mdNote)[@"id"];
+        // Read markdown and pipe to write-markdown --dry-run
+        NSString *cmd = [NSString stringWithFormat:@"'%s' read-markdown --id '%@' 2>/dev/null | '%s' write-markdown --id '%@' --dry-run 2>/dev/null",
+            exePath, mdNoteID, exePath, mdNoteID];
+        FILE *fp = popen([cmd UTF8String], "r");
+        NSMutableData *outData = [NSMutableData data];
+        if (fp) {
+            char buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) [outData appendBytes:buf length:n];
+            pclose(fp);
+        }
+        NSDictionary *result = [NSJSONSerialization JSONObjectWithData:outData options:0 error:nil];
+        NSUInteger modified = [result[@"paragraphsModified"] unsignedIntegerValue];
+        NSUInteger insertedCount = [result[@"paragraphsInserted"] unsignedIntegerValue];
+        NSUInteger deletedCount = [result[@"paragraphsDeleted"] unsignedIntegerValue];
+        if (modified == 0 && insertedCount == 0 && deletedCount == 0) {
+            fprintf(stderr, "  PASS\n"); passed++;
+        } else {
+            fprintf(stderr, "  FAIL (modified=%lu, inserted=%lu, deleted=%lu)\n",
+                (unsigned long)modified, (unsigned long)insertedCount, (unsigned long)deletedCount); failed++;
+        }
+
+        deleteNote(findNoteByID(viewContext, mdNoteID), viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: write-markdown text change (in-process)
+    fprintf(stderr, "Test: write-markdown text change...\n");
+    {
+        NSString *mdTitle = @"__md_test_textchange__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        NSString *mdContent = [NSString stringWithFormat:@"%@\nOriginal line\nUntouched line", mdTitle];
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdContent, 0);
+        id s0 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length + 1));
+        id s3 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3, sel_registerName("setStyle:"), 3);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s3}, NSMakeRange(mdTitle.length + 1, mdContent.length - mdTitle.length - 1));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSString *mdNoteID = noteToDict(mdNote)[@"id"];
+        // Redirect stdout to /dev/null during write
+        int savedOut = dup(STDOUT_FILENO);
+        int devNull1 = open("/dev/null", O_WRONLY);
+        dup2(devNull1, STDOUT_FILENO); close(devNull1);
+
+        NSString *newMd = [NSString stringWithFormat:@"# %@\nModified line\nUntouched line\n", mdTitle];
+        cmdWriteMarkdownWithString(mdNote, viewContext, newMd, NO, NO);
+
+        dup2(savedOut, STDOUT_FILENO); close(savedOut);
+
+        // Verify the note was modified
+        mdNote = findNoteByID(viewContext, mdNoteID);
+        NSString *body = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("noteAsPlainTextWithoutTitle"));
+        BOOL hasModified = [body containsString:@"Modified line"];
+        BOOL hasUntouched = [body containsString:@"Untouched line"];
+        if (hasModified && hasUntouched) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (body: %s)\n", [body UTF8String]); failed++; }
+
+        deleteNote(findNoteByID(viewContext, mdNoteID), viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: write-markdown add paragraph
+    fprintf(stderr, "Test: write-markdown add paragraph...\n");
+    {
+        NSString *mdTitle = @"__md_test_addpara__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        NSString *mdContent = [NSString stringWithFormat:@"%@\nExisting line", mdTitle];
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdContent, 0);
+        id s0 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length + 1));
+        id s3 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3, sel_registerName("setStyle:"), 3);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s3}, NSMakeRange(mdTitle.length + 1, 13));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSString *mdNoteID = noteToDict(mdNote)[@"id"];
+        int savedOut = dup(STDOUT_FILENO);
+        int devNull1 = open("/dev/null", O_WRONLY);
+        dup2(devNull1, STDOUT_FILENO); close(devNull1);
+
+        NSString *newMd = [NSString stringWithFormat:@"# %@\nExisting line\nNew line added\n", mdTitle];
+        cmdWriteMarkdownWithString(mdNote, viewContext, newMd, NO, NO);
+
+        dup2(savedOut, STDOUT_FILENO); close(savedOut);
+
+        mdNote = findNoteByID(viewContext, mdNoteID);
+        NSString *body = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("noteAsPlainTextWithoutTitle"));
+        BOOL hasExisting = [body containsString:@"Existing line"];
+        BOOL hasNew = [body containsString:@"New line added"];
+        if (hasExisting && hasNew) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (body: %s)\n", [body UTF8String]); failed++; }
+
+        deleteNote(findNoteByID(viewContext, mdNoteID), viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: write-markdown delete paragraph
+    fprintf(stderr, "Test: write-markdown delete paragraph...\n");
+    {
+        NSString *mdTitle = @"__md_test_delpara__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        NSString *mdContent = [NSString stringWithFormat:@"%@\nKeep me\nDelete me\nAlso keep", mdTitle];
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdContent, 0);
+        id s0 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length + 1));
+        id s3 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3, sel_registerName("setStyle:"), 3);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s3}, NSMakeRange(mdTitle.length + 1, mdContent.length - mdTitle.length - 1));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSString *mdNoteID = noteToDict(mdNote)[@"id"];
+        int savedOut = dup(STDOUT_FILENO);
+        int devNull1 = open("/dev/null", O_WRONLY);
+        dup2(devNull1, STDOUT_FILENO); close(devNull1);
+
+        NSString *newMd = [NSString stringWithFormat:@"# %@\nKeep me\nAlso keep\n", mdTitle];
+        cmdWriteMarkdownWithString(mdNote, viewContext, newMd, NO, NO);
+
+        dup2(savedOut, STDOUT_FILENO); close(savedOut);
+
+        mdNote = findNoteByID(viewContext, mdNoteID);
+        NSString *body = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("noteAsPlainTextWithoutTitle"));
+        BOOL hasKeep = [body containsString:@"Keep me"];
+        BOOL hasAlso = [body containsString:@"Also keep"];
+        BOOL hasDelete = [body containsString:@"Delete me"];
+        if (hasKeep && hasAlso && !hasDelete) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (body: %s)\n", [body UTF8String]); failed++; }
+
+        deleteNote(findNoteByID(viewContext, mdNoteID), viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: write-markdown dry-run mode
+    fprintf(stderr, "Test: write-markdown dry-run...\n");
+    {
+        NSString *mdTitle = @"__md_test_dryrun__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        NSString *mdContent = [NSString stringWithFormat:@"%@\nOriginal text", mdTitle];
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdContent, 0);
+        id s0 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length + 1));
+        id s3 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3, sel_registerName("setStyle:"), 3);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s3}, NSMakeRange(mdTitle.length + 1, 13));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSString *mdNoteID = noteToDict(mdNote)[@"id"];
+        // Redirect stdout to /dev/null during dry-run
+        int savedOut = dup(STDOUT_FILENO);
+        int devNull1 = open("/dev/null", O_WRONLY);
+        dup2(devNull1, STDOUT_FILENO); close(devNull1);
+
+        NSString *newMd = [NSString stringWithFormat:@"# %@\nChanged text\n", mdTitle];
+        cmdWriteMarkdownWithString(mdNote, viewContext, newMd, YES, NO);
+
+        dup2(savedOut, STDOUT_FILENO); close(savedOut);
+
+        // Verify note was NOT changed (dry-run)
+        mdNote = findNoteByID(viewContext, mdNoteID);
+        NSString *body = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("noteAsPlainTextWithoutTitle"));
+        BOOL unchanged = [body containsString:@"Original text"];
+        if (unchanged) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (body: %s)\n", [body UTF8String]); failed++; }
+
+        deleteNote(findNoteByID(viewContext, mdNoteID), viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: write-markdown checklist toggle
+    fprintf(stderr, "Test: write-markdown checklist toggle...\n");
+    {
+        NSString *mdTitle = @"__md_test_toggle__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdTitle, 0);
+        id s0 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdTitle.length), mdTitle.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSString *mdNoteID = noteToDict(mdNote)[@"id"];
+        cmdAppend(viewContext, mdNoteID, @"Todo item", 103);
+        mdNote = findNoteByID(viewContext, mdNoteID);
+
+        // Toggle checked
+        int savedOut = dup(STDOUT_FILENO);
+        int devNull1 = open("/dev/null", O_WRONLY);
+        dup2(devNull1, STDOUT_FILENO); close(devNull1);
+
+        NSString *newMd = [NSString stringWithFormat:@"# %@\n- [x] Todo item\n", mdTitle];
+        cmdWriteMarkdownWithString(mdNote, viewContext, newMd, NO, NO);
+
+        dup2(savedOut, STDOUT_FILENO); close(savedOut);
+        // Verify the checklist item is now checked
+        mdNote = findNoteByID(viewContext, mdNoteID);
+        id mdDoc2 = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs2 = ((id (*)(id, SEL))objc_msgSend)(mdDoc2, sel_registerName("mergeableString"));
+        NSString *fullText = [((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("attributedString")) string];
+        BOOL foundChecked = NO;
+        NSUInteger ci = 0;
+        while (ci < fullText.length) {
+            NSRange cr;
+            NSDictionary *ca = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                mdMs2, sel_registerName("attributesAtIndex:effectiveRange:"), ci, &cr);
+            id cs = ca[@"TTStyle"];
+            if (cs) {
+                int csv = (int)((NSInteger (*)(id, SEL))objc_msgSend)(cs, sel_registerName("style"));
+                if (csv == 103) {
+                    id ctodo = ((id (*)(id, SEL))objc_msgSend)(cs, sel_registerName("todo"));
+                    if (ctodo && ((BOOL (*)(id, SEL))objc_msgSend)(ctodo, sel_registerName("done"))) {
+                        foundChecked = YES;
+                    }
+                }
+            }
+            ci = cr.location + cr.length;
+        }
+        if (foundChecked) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (checklist not toggled)\n"); failed++; }
+
+        deleteNote(findNoteByID(viewContext, mdNoteID), viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: line prefix escaping
+    fprintf(stderr, "Test: line prefix escaping...\n");
+    {
+        // Test that body text starting with "# " gets escaped
+        NSString *mdTitle = @"__md_test_prefix__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        NSString *mdContent = [NSString stringWithFormat:@"%@\n# Not a heading\n- Not a list\n1. Not numbered", mdTitle];
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdContent, 0);
+        id s0 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length + 1));
+        // All remaining is body style
+        id s3 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3, sel_registerName("setStyle:"), 3);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s3}, NSMakeRange(mdTitle.length + 1, mdContent.length - mdTitle.length - 1));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSArray *model = noteToParaModel(mdNote);
+        NSMutableArray *filtered = [NSMutableArray array];
+        BOOL fc = NO;
+        for (NSDictionary *p in model) {
+            if (!fc && [p[@"text"] length] == 0) continue;
+            fc = YES;
+            [filtered addObject:p];
+        }
+        NSString *markdown = paraModelToMarkdown(filtered);
+        // The body lines should have escaped prefixes
+        // The markdown output contains escaped body text lines
+        // Find lines that should be escaped
+        NSArray *mdLines = [markdown componentsSeparatedByString:@"\n"];
+        BOOL hasEscapedHash = NO, hasEscapedDash = NO, hasEscapedNum = NO;
+        for (NSString *mdLine in mdLines) {
+            // After escapeMarkdown, # stays as # (not in escape list), prefix escape adds backslash
+            if ([mdLine containsString:@"Not a heading"] && [mdLine hasPrefix:@"\\#"]) hasEscapedHash = YES;
+            if ([mdLine containsString:@"Not a list"] && [mdLine hasPrefix:@"\\-"]) hasEscapedDash = YES;
+            if ([mdLine containsString:@"Not numbered"] && [mdLine containsString:@"\\."]) hasEscapedNum = YES;
+        }
+        if (hasEscapedHash && hasEscapedDash && hasEscapedNum) {
+            fprintf(stderr, "  PASS\n"); passed++;
+        } else {
+            fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++;
+        }
+
+        deleteNote(mdNote, viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: CRLF normalization
+    fprintf(stderr, "Test: CRLF normalization...\n");
+    {
+        NSString *crlfInput = @"# Title\r\nBody line\r\n";
+        NSArray *model = markdownToParaModel(crlfInput);
+        BOOL titleFound = NO, bodyFound = NO;
+        for (NSDictionary *p in model) {
+            if ([p[@"style"] integerValue] == 0 && [p[@"text"] isEqualToString:@"Title"]) titleFound = YES;
+            if ([p[@"style"] integerValue] == 3 && [p[@"text"] isEqualToString:@"Body line"]) bodyFound = YES;
+        }
+        if (titleFound && bodyFound) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL\n"); failed++; }
+    }
+
+    // Test: rejected link scheme
+    fprintf(stderr, "Test: rejected link scheme...\n");
+    {
+        NSString *dangerousMd = @"[click](javascript:alert(1))";
+        NSArray *model = markdownToParaModel(dangerousMd);
+        // Should be treated as literal text (no link run)
+        BOOL hasLink = NO;
+        for (NSDictionary *p in model) {
+            NSArray *runs = p[@"runs"];
+            for (NSDictionary *r in runs) {
+                if (r[@"link"]) hasLink = YES;
+            }
+        }
+        if (!hasLink) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (link was not rejected)\n"); failed++; }
+    }
+
     // Test 19: Delete notes
     fprintf(stderr, "Test 19: Delete notes...\n");
     {
@@ -2620,11 +4422,10 @@ static void usage(void) {
     fprintf(stderr, "and optional properties (todo-done, link, strikethrough). Use read-attrs to see\n");
     fprintf(stderr, "the raw attribute stream. All editing operates on character offsets.\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "Primitives give you full control — you can do anything with read-attrs, set-attr,\n");
-    fprintf(stderr, "insert, and delete-range. Convenience commands (marked below) combine multiple\n");
-    fprintf(stderr, "primitives for common operations.\n");
+    fprintf(stderr, "Primitive commands:\n");
+    fprintf(stderr, "  These give you full control over notes. You can do anything with read-attrs,\n");
+    fprintf(stderr, "  set-attr, insert, and delete-range.\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "Primitives:\n");
     fprintf(stderr, "  notes-cli-v2 folders\n");
     fprintf(stderr, "  notes-cli-v2 list [--folder <name>] [--limit <n>]\n");
     fprintf(stderr, "  notes-cli-v2 get (--title <title> | --id <id>) [--folder <name>]\n");
@@ -2636,13 +4437,6 @@ static void usage(void) {
     fprintf(stderr, "  notes-cli-v2 insert --id <id> --text <text> --position <n> [--style <n>] [--body-offset]\n");
     fprintf(stderr, "  notes-cli-v2 delete-range --id <id> --start <n> --length <n> [--body-offset]\n");
     fprintf(stderr, "  notes-cli-v2 set-attr --id <id> --offset <n> --length <n> [--style <n>] [--indent <n>] [--todo-done true|false] [--link <url>] [--body-offset]\n");
-    fprintf(stderr, "\n");
-    fprintf(stderr, "  --body-offset    Treat offset/position/start as relative to body text (after title).\n");
-    fprintf(stderr, "                   Use this when offsets come from 'notekit read' output.\n");
-    fprintf(stderr, "                   Without this flag, offsets are into the full internal string\n");
-    fprintf(stderr, "                   (including leading newline + title + newline).\n");
-    fprintf(stderr, "                   Errors if the note has no body text (title-only note).\n");
-    fprintf(stderr, "\n");
     fprintf(stderr, "  notes-cli-v2 move --id <id> --to <to-folder>\n");
     fprintf(stderr, "  notes-cli-v2 create-folder --name <name>\n");
     fprintf(stderr, "  notes-cli-v2 delete-folder --name <name>\n");
@@ -2650,15 +4444,29 @@ static void usage(void) {
     fprintf(stderr, "  notes-cli-v2 pin --id <id>\n");
     fprintf(stderr, "  notes-cli-v2 unpin --id <id>\n");
     fprintf(stderr, "  notes-cli-v2 get-link --id <id>                     Get applenotes:// URL for note-to-note linking\n");
-    fprintf(stderr, "\n  Convenience (composed from primitives):\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  --body-offset    Treat offset/position/start as relative to body text (after title).\n");
+    fprintf(stderr, "                   Use this when offsets come from 'notekit read' output.\n");
+    fprintf(stderr, "                   Without this flag, offsets are into the full internal string\n");
+    fprintf(stderr, "                   (including leading newline + title + newline).\n");
+    fprintf(stderr, "                   Errors if the note has no body text (title-only note).\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Convenience commands:\n");
+    fprintf(stderr, "  These compose multiple primitives for common operations. Everything they do\n");
+    fprintf(stderr, "  can be accomplished with the primitive commands above.\n");
+    fprintf(stderr, "\n");
     fprintf(stderr, "  notes-cli-v2 replace --id <id> --search <text> --replacement <text>\n");
     fprintf(stderr, "  notes-cli-v2 read-structured (--title <title> | --id <id>) [--folder <name>]\n");
+    fprintf(stderr, "  notes-cli-v2 read-markdown (--title <title> | --id <id>) [--folder <name>]\n");
+    fprintf(stderr, "  notes-cli-v2 write-markdown --id <id> [--dry-run] [--backup]            Read markdown from stdin, diff-update note\n");
     fprintf(stderr, "  notes-cli-v2 duplicate --id <id> [--new-title <new-title>]\n");
     fprintf(stderr, "  notes-cli-v2 delete-line --id <id> --search-text <search-text>\n");
     fprintf(stderr, "  notes-cli-v2 add-link --id <id> --target <id> [--text <text>] [--position <n>]   Insert note-to-note link\n");
-    fprintf(stderr, "\n  Skill management:\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Skill management:\n");
     fprintf(stderr, "  notes-cli-v2 install-skill [--claude] [--agents] [--force]\n");
-    fprintf(stderr, "\n  Testing:\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Testing:\n");
     fprintf(stderr, "  notes-cli-v2 test\n");
 }
 
@@ -2685,7 +4493,9 @@ int main(int argc, const char *argv[]) {
                     [flag isEqualToString:@"claude"] ||
                     [flag isEqualToString:@"agents"] ||
                     [flag isEqualToString:@"force"] ||
-                    [flag isEqualToString:@"body-offset"]) {
+                    [flag isEqualToString:@"body-offset"] ||
+                    [flag isEqualToString:@"dry-run"] ||
+                    [flag isEqualToString:@"backup"]) {
                     opts[flag] = @"true";
                 } else if (i + 1 < argc) {
                     opts[flag] = [NSString stringWithUTF8String:argv[++i]];
@@ -2763,6 +4573,27 @@ int main(int argc, const char *argv[]) {
                 return cmdReadStructuredNote(note);
             }
             return cmdReadStructured(viewContext, kwTitle, folderName);
+
+        } else if ([command isEqualToString:@"read-markdown"]) {
+            NSString *noteID = opts[@"id"];
+            if (!noteID && !kwTitle) { fprintf(stderr, "Error: --title or --id required\n"); usage(); return 1; }
+            if (noteID) {
+                id note = findNoteByID(viewContext, noteID);
+                if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", noteID]);
+                return cmdReadMarkdownNote(note);
+            }
+            id note = findNote(viewContext, kwTitle, folderName);
+            if (!note) errorExit([NSString stringWithFormat:@"Note not found: %@", kwTitle]);
+            return cmdReadMarkdownNote(note);
+
+        } else if ([command isEqualToString:@"write-markdown"]) {
+            NSString *noteID = opts[@"id"];
+            if (!noteID) { fprintf(stderr, "Error: --id required\n"); usage(); return 1; }
+            id note = findNoteByID(viewContext, noteID);
+            if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", noteID]);
+            BOOL dryRun = [opts[@"dry-run"] isEqualToString:@"true"];
+            BOOL backupFlag = [opts[@"backup"] isEqualToString:@"true"];
+            return cmdWriteMarkdownNote(note, viewContext, dryRun, backupFlag);
 
         } else if ([command isEqualToString:@"set-attr"]) {
             NSString *noteID = opts[@"id"];

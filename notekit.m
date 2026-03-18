@@ -1442,8 +1442,9 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
                     runText = run[@"noteLinkDisplayText"];
                 }
 
-                // Replace U+2028 (line separator) with space — Apple Notes uses this for soft breaks
-                runText = [runText stringByReplacingOccurrencesOfString:@"\u2028" withString:@" "];
+                // Temporarily replace U+2028 with a placeholder before escaping
+                // (escapeMarkdown would escape the < in <br>)
+                runText = [runText stringByReplacingOccurrencesOfString:@"\u2028" withString:@"\x01BR\x01"];
                 // Strip trailing hard newlines from run text
                 while (runText.length > 0 && [runText characterAtIndex:runText.length - 1] == '\n') {
                     runText = [runText substringToIndex:runText.length - 1];
@@ -1451,6 +1452,8 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
                 if (runText.length == 0) { cursor = start + len; continue; }
 
                 NSString *escaped = escapeMarkdown(runText);
+                // Restore <br> from placeholder (after escaping so < isn't escaped)
+                escaped = [escaped stringByReplacingOccurrencesOfString:@"\x01BR\x01" withString:@"<br>"];
 
                 // Apply link wrapping
                 if (run[@"link"]) {
@@ -1852,6 +1855,11 @@ static NSArray *markdownToParaModel(NSString *markdown) {
                     }
                 }
             }
+        }
+
+        // Convert <br> to U+2028 (soft line break) for write round-trip fidelity
+        if (textContent) {
+            textContent = [textContent stringByReplacingOccurrencesOfString:@"<br>" withString:@"\u2028"];
         }
 
         // Parse inline formatting

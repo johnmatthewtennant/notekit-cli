@@ -1512,14 +1512,28 @@ static void parseInlineFormatting(NSString *lineText, NSMutableString *outPlainT
                 range:NSMakeRange(i + 2, len - i - 2)];
             if (closeRange.location != NSNotFound) {
                 NSString *inner = [lineText substringWithRange:NSMakeRange(i + 2, closeRange.location - i - 2)];
-                NSString *unescaped = unescapeMarkdown(inner);
-                NSUInteger start = outPlainText.length;
-                [outPlainText appendString:unescaped];
-                [outRuns addObject:[@{
-                    @"start": @(start),
-                    @"length": @(unescaped.length),
-                    @"strikethrough": @YES
-                } mutableCopy]];
+                // Recursively parse inner text for links and other formatting
+                NSMutableString *innerPlain = [NSMutableString string];
+                NSMutableArray *innerRuns = [NSMutableArray array];
+                parseInlineFormatting(inner, innerPlain, innerRuns);
+
+                NSUInteger baseOffset = outPlainText.length;
+                [outPlainText appendString:innerPlain];
+
+                // Add strikethrough to all inner runs
+                for (NSMutableDictionary *innerRun in innerRuns) {
+                    innerRun[@"start"] = @([innerRun[@"start"] unsignedIntegerValue] + baseOffset);
+                    innerRun[@"strikethrough"] = @YES;
+                    [outRuns addObject:innerRun];
+                }
+                // If no inner runs, create one for the whole text
+                if (innerRuns.count == 0 && innerPlain.length > 0) {
+                    [outRuns addObject:[@{
+                        @"start": @(baseOffset),
+                        @"length": @(innerPlain.length),
+                        @"strikethrough": @YES
+                    } mutableCopy]];
+                }
                 i = closeRange.location + 2;
                 continue;
             }

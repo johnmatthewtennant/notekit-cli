@@ -2,3 +2,4 @@ notekit
 notes-inspect
 *.o
 .DS_Store
+thoughts/

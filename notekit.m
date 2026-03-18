@@ -4422,11 +4422,10 @@ static void usage(void) {
     fprintf(stderr, "and optional properties (todo-done, link, strikethrough). Use read-attrs to see\n");
     fprintf(stderr, "the raw attribute stream. All editing operates on character offsets.\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "Primitives give you full control — you can do anything with read-attrs, set-attr,\n");
-    fprintf(stderr, "insert, and delete-range. Convenience commands (marked below) combine multiple\n");
-    fprintf(stderr, "primitives for common operations.\n");
+    fprintf(stderr, "Primitive commands:\n");
+    fprintf(stderr, "  These give you full control over notes. You can do anything with read-attrs,\n");
+    fprintf(stderr, "  set-attr, insert, and delete-range.\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "Primitives:\n");
     fprintf(stderr, "  notes-cli-v2 folders\n");
     fprintf(stderr, "  notes-cli-v2 list [--folder <name>] [--limit <n>]\n");
     fprintf(stderr, "  notes-cli-v2 get (--title <title> | --id <id>) [--folder <name>]\n");
@@ -4438,13 +4437,6 @@ static void usage(void) {
     fprintf(stderr, "  notes-cli-v2 insert --id <id> --text <text> --position <n> [--style <n>] [--body-offset]\n");
     fprintf(stderr, "  notes-cli-v2 delete-range --id <id> --start <n> --length <n> [--body-offset]\n");
     fprintf(stderr, "  notes-cli-v2 set-attr --id <id> --offset <n> --length <n> [--style <n>] [--indent <n>] [--todo-done true|false] [--link <url>] [--body-offset]\n");
-    fprintf(stderr, "\n");
-    fprintf(stderr, "  --body-offset    Treat offset/position/start as relative to body text (after title).\n");
-    fprintf(stderr, "                   Use this when offsets come from 'notekit read' output.\n");
-    fprintf(stderr, "                   Without this flag, offsets are into the full internal string\n");
-    fprintf(stderr, "                   (including leading newline + title + newline).\n");
-    fprintf(stderr, "                   Errors if the note has no body text (title-only note).\n");
-    fprintf(stderr, "\n");
     fprintf(stderr, "  notes-cli-v2 move --id <id> --to <to-folder>\n");
     fprintf(stderr, "  notes-cli-v2 create-folder --name <name>\n");
     fprintf(stderr, "  notes-cli-v2 delete-folder --name <name>\n");
@@ -4452,7 +4444,17 @@ static void usage(void) {
     fprintf(stderr, "  notes-cli-v2 pin --id <id>\n");
     fprintf(stderr, "  notes-cli-v2 unpin --id <id>\n");
     fprintf(stderr, "  notes-cli-v2 get-link --id <id>                     Get applenotes:// URL for note-to-note linking\n");
-    fprintf(stderr, "\n  Convenience (composed from primitives):\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  --body-offset    Treat offset/position/start as relative to body text (after title).\n");
+    fprintf(stderr, "                   Use this when offsets come from 'notekit read' output.\n");
+    fprintf(stderr, "                   Without this flag, offsets are into the full internal string\n");
+    fprintf(stderr, "                   (including leading newline + title + newline).\n");
+    fprintf(stderr, "                   Errors if the note has no body text (title-only note).\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Convenience commands:\n");
+    fprintf(stderr, "  These compose multiple primitives for common operations. Everything they do\n");
+    fprintf(stderr, "  can be accomplished with the primitive commands above.\n");
+    fprintf(stderr, "\n");
     fprintf(stderr, "  notes-cli-v2 replace --id <id> --search <text> --replacement <text>\n");
     fprintf(stderr, "  notes-cli-v2 read-structured (--title <title> | --id <id>) [--folder <name>]\n");
     fprintf(stderr, "  notes-cli-v2 read-markdown (--title <title> | --id <id>) [--folder <name>]\n");
@@ -4460,9 +4462,11 @@ static void usage(void) {
     fprintf(stderr, "  notes-cli-v2 duplicate --id <id> [--new-title <new-title>]\n");
     fprintf(stderr, "  notes-cli-v2 delete-line --id <id> --search-text <search-text>\n");
     fprintf(stderr, "  notes-cli-v2 add-link --id <id> --target <id> [--text <text>] [--position <n>]   Insert note-to-note link\n");
-    fprintf(stderr, "\n  Skill management:\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Skill management:\n");
     fprintf(stderr, "  notes-cli-v2 install-skill [--claude] [--agents] [--force]\n");
-    fprintf(stderr, "\n  Testing:\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Testing:\n");
     fprintf(stderr, "  notes-cli-v2 test\n");
 }
 

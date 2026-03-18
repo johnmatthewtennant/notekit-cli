@@ -1004,8 +1004,12 @@ static int cmdAppend(id viewContext, NSString *identifier, NSString *text, NSInt
 
     NSInteger actualStyle = (styleValue >= 0) ? styleValue : 3;
     id paraStyle = makeParagraphStyle(actualStyle);
+    // Apply style only to the text portion (oldLen+1), not the leading '\n'.
+    // The '\n' is a paragraph terminator for the preceding paragraph and must
+    // keep its existing style; styling it as checklist/list creates a blank
+    // styled paragraph before the new item.
     ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
-        @{@"TTStyle": paraStyle}, NSMakeRange(oldLen, toInsert.length));
+        @{@"TTStyle": paraStyle}, NSMakeRange(oldLen + 1, text.length));
 
     saveNote(note, viewContext, oldLen + toInsert.length, toInsert.length);
     printJSON(@{@"id": identifier, @"appended": text});
@@ -2031,7 +2035,9 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
             for (NSArray *p in lcsPairs) {
                 if ([p[1] isEqual:@(j)]) { pair = p; break; }
             }
+            if (!pair) continue; // guard: matched entry with no corresponding LCS pair (corrupted state)
             NSUInteger oldIdx = [pair[0] unsignedIntegerValue];
+            if (oldIdx >= filteredOld.count) continue; // guard: out-of-bounds old index
             // Check if the matched pair actually differs in some way
             if (!paragraphsEqual(filteredOld[oldIdx], newModel[j])) {
                 [mutations addObject:@{@"type": @"modify", @"oldIndex": @(oldIdx),
@@ -2210,8 +2216,16 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
         NSString *opType = op[@"op"];
         NSUInteger pos = [op[@"pos"] unsignedIntegerValue];
 
+        @try {
+
         if ([opType isEqualToString:@"delete"]) {
             NSUInteger deleteLen = [op[@"len"] unsignedIntegerValue];
+            NSUInteger currentMsLenForDelete = (NSUInteger)((NSInteger)msLen + cumulativeDelta);
+            if (pos + deleteLen > currentMsLenForDelete) {
+                fprintf(stderr, "warning: skipping delete mutation at pos %lu len %lu (exceeds string length %lu)\n",
+                    (unsigned long)pos, (unsigned long)deleteLen, (unsigned long)currentMsLenForDelete);
+                continue;
+            }
             ((void (*)(id, SEL, NSRange))objc_msgSend)(ms, sel_registerName("deleteCharactersInRange:"),
                 NSMakeRange(pos, deleteLen));
             cumulativeDelta -= (NSInteger)deleteLen;
@@ -2304,6 +2318,12 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
             NSString *newText = newPara[@"text"];
             NSString *toInsert = [NSString stringWithFormat:@"%@\n", newText];
 
+            NSUInteger currentMsLenForInsert = (NSUInteger)((NSInteger)msLen + cumulativeDelta);
+            if (pos > currentMsLenForInsert) {
+                fprintf(stderr, "warning: clamping insert position %lu to string length %lu\n",
+                    (unsigned long)pos, (unsigned long)currentMsLenForInsert);
+                pos = currentMsLenForInsert;
+            }
             ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"),
                 toInsert, pos);
 
@@ -2360,6 +2380,11 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
             }
 
             cumulativeDelta += (NSInteger)toInsert.length;
+        }
+
+        } @catch (NSException *mutationEx) {
+            fprintf(stderr, "warning: skipping mutation op '%s' at pos %lu due to exception: %s\n",
+                [opType UTF8String], (unsigned long)pos, [[mutationEx description] UTF8String]);
         }
     }
 

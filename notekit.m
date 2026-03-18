@@ -2028,7 +2028,7 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
                     insertPos = fullText.length;
                 }
             }
-            [ops addObject:@{@"op": @"insert", @"pos": @(insertPos), @"newPara": newModel[newIdx]}];
+            [ops addObject:@{@"op": @"insert", @"pos": @(insertPos), @"newPara": newModel[newIdx], @"newIndex": @(newIdx)}];
         }
     }
 
@@ -2040,7 +2040,11 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
         // At same position: deletes before inserts (delete removes old content first)
         int prioA = [a[@"op"] isEqualToString:@"delete"] ? 0 : ([a[@"op"] isEqualToString:@"modify"] ? 1 : 2);
         int prioB = [b[@"op"] isEqualToString:@"delete"] ? 0 : ([b[@"op"] isEqualToString:@"modify"] ? 1 : 2);
-        return prioA < prioB ? NSOrderedAscending : (prioA > prioB ? NSOrderedDescending : NSOrderedSame);
+        if (prioA != prioB) return prioA < prioB ? NSOrderedAscending : NSOrderedDescending;
+        // For inserts at the same position, process higher newIndex first so paragraphs
+        // end up in correct top-to-bottom order after bottom-to-top insertion
+        if (prioA == 2) return [b[@"newIndex"] compare:a[@"newIndex"]];
+        return NSOrderedSame;
     }];
 
     NSInteger cumulativeDelta = 0;

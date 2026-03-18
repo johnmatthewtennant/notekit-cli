@@ -104,6 +104,8 @@ static NSArray *fetchNotes(id viewContext, NSString *folderName, NSUInteger limi
     return notes;
 }
 
+static NSDictionary *noteToDict(id note); // forward declaration
+
 static NSArray *findNotes(id viewContext, NSString *title, NSString *folderName) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
     if (folderName) {
@@ -121,6 +123,23 @@ static id findNote(id viewContext, NSString *title, NSString *folderName) {
     NSArray *notes = findNotes(viewContext, title, folderName);
     if (notes.count == 0) return nil;
     return notes[0];
+}
+
+// Returns exactly one note matching title, or exits with an error listing all matches.
+// Use this for commands that operate on a single note (read, read-attrs, etc.)
+// to avoid silently acting on the wrong note when multiple match.
+static id requireSingleNote(id viewContext, NSString *title, NSString *folderName) {
+    NSArray *notes = findNotes(viewContext, title, folderName);
+    if (notes.count == 0) errorExit([NSString stringWithFormat:@"Note not found: %@", title]);
+    if (notes.count == 1) return notes[0];
+    NSMutableString *msg = [NSMutableString stringWithFormat:
+        @"Multiple notes match \"%@\". Use --id to specify:\n", title];
+    for (id note in notes) {
+        NSDictionary *d = noteToDict(note);
+        [msg appendFormat:@"  %@  %@\n", d[@"id"], d[@"title"]];
+    }
+    errorExit(msg);
+    return nil; // unreachable
 }
 
 static id findNoteByID(id viewContext, NSString *identifier) {
@@ -281,8 +300,7 @@ static int cmdReadNote(id note) {
 }
 
 static int cmdRead(id viewContext, NSString *title, NSString *folderName) {
-    id note = findNote(viewContext, title, folderName);
-    if (!note) errorExit([NSString stringWithFormat:@"Note not found: %@", title]);
+    id note = requireSingleNote(viewContext, title, folderName);
     return cmdReadNote(note);
 }
 
@@ -366,8 +384,7 @@ static int cmdReadAttrsNote(id note) {
 }
 
 static int cmdReadAttrs(id viewContext, NSString *title, NSString *folderName) {
-    id note = findNote(viewContext, title, folderName);
-    if (!note) errorExit([NSString stringWithFormat:@"Note not found: %@", title]);
+    id note = requireSingleNote(viewContext, title, folderName);
     return cmdReadAttrsNote(note);
 }
 
@@ -906,8 +923,7 @@ static int cmdReadStructuredNote(id note) {
 }
 
 static int cmdReadStructured(id viewContext, NSString *title, NSString *folderName) {
-    id note = findNote(viewContext, title, folderName);
-    if (!note) errorExit([NSString stringWithFormat:@"Note not found: %@", title]);
+    id note = requireSingleNote(viewContext, title, folderName);
     return cmdReadStructuredNote(note);
 }
 
@@ -4304,6 +4320,31 @@ static int cmdTest(id viewContext) {
         }
     }
 
+    // Test: read --title errors on ambiguous match
+    fprintf(stderr, "Test: read --title ambiguous match error...\n");
+    {
+        // "__notes_cli_test" matches both testTitle and testTitle2
+        NSString *cmd = [NSString stringWithFormat:@"'%s' read --title '__notes_cli_test' --folder '%@' 2>&1 1>/dev/null", exePath, testFolderName];
+        FILE *fp = popen([cmd UTF8String], "r");
+        NSMutableData *outData = [NSMutableData data];
+        if (fp) {
+            char buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) [outData appendBytes:buf length:n];
+            int status = pclose(fp);
+            NSString *errOutput = [[NSString alloc] initWithData:outData encoding:NSUTF8StringEncoding];
+            BOOL exitedNonZero = WEXITSTATUS(status) != 0;
+            BOOL mentionsMultiple = [errOutput containsString:@"Multiple notes match"];
+            BOOL mentionsId = [errOutput containsString:@"--id"];
+            if (exitedNonZero && mentionsMultiple && mentionsId) {
+                fprintf(stderr, "  PASS\n"); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (exit=%d multiple=%d id=%d stderr=%s)\n",
+                    exitedNonZero, mentionsMultiple, mentionsId, [errOutput UTF8String]); failed++;
+            }
+        } else { fprintf(stderr, "  FAIL (popen failed)\n"); failed++; }
+    }
+
     // Test 19: Delete notes
     fprintf(stderr, "Test 19: Delete notes...\n");
     {
@@ -4621,8 +4662,7 @@ int main(int argc, const char *argv[]) {
                 if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", noteID]);
                 return cmdReadMarkdownNote(note);
             }
-            id note = findNote(viewContext, kwTitle, folderName);
-            if (!note) errorExit([NSString stringWithFormat:@"Note not found: %@", kwTitle]);
+            id note = requireSingleNote(viewContext, kwTitle, folderName);
             return cmdReadMarkdownNote(note);
 
         } else if ([command isEqualToString:@"write-markdown"]) {

@@ -1548,8 +1548,51 @@ static void parseInlineFormatting(NSString *lineText, NSMutableString *outPlainT
             }
         }
 
+        // Check for bare URL (http://, https://, mailto:)
+        if ((c == 'h' || c == 'm') && i + 4 < len) {
+            NSString *rest = [lineText substringFromIndex:i];
+            NSString *scheme = nil;
+            if ([rest hasPrefix:@"https://"]) scheme = @"https://";
+            else if ([rest hasPrefix:@"http://"]) scheme = @"http://";
+            else if ([rest hasPrefix:@"mailto:"]) scheme = @"mailto:";
+
+            if (scheme) {
+                // Find end of URL: consume until whitespace, ), ], or end of string
+                NSUInteger urlEnd = i + scheme.length;
+                while (urlEnd < len) {
+                    unichar uc = [lineText characterAtIndex:urlEnd];
+                    if (uc == ' ' || uc == '\t' || uc == '\n' || uc == '\r' ||
+                        uc == ')' || uc == ']' || uc == '>' || uc == 0xFF0C || uc == 0x3001) break;
+                    urlEnd++;
+                }
+                // Strip trailing punctuation that's likely not part of the URL
+                while (urlEnd > i + scheme.length) {
+                    unichar last = [lineText characterAtIndex:urlEnd - 1];
+                    if (last == '.' || last == ',' || last == ';' || last == ':' ||
+                        last == '!' || last == '?') {
+                        urlEnd--;
+                    } else {
+                        break;
+                    }
+                }
+                NSString *urlStr = [lineText substringWithRange:NSMakeRange(i, urlEnd - i)];
+                NSURL *url = [NSURL URLWithString:urlStr];
+                if (url && isAllowedLinkScheme(url)) {
+                    NSUInteger start = outPlainText.length;
+                    [outPlainText appendString:urlStr];
+                    [outRuns addObject:[@{
+                        @"start": @(start),
+                        @"length": @(urlStr.length),
+                        @"link": urlStr
+                    } mutableCopy]];
+                    i = urlEnd;
+                    continue;
+                }
+            }
+        }
+
         // Check for <u>text</u> (underline)
-        if (c == '<' && i + 2 < len) {
+        if ((c == '<') && i + 2 < len) {
             NSString *rest = [lineText substringFromIndex:i];
             if ([rest hasPrefix:@"<u>"]) {
                 NSRange closeTag = [lineText rangeOfString:@"</u>" options:0

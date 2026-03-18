@@ -1557,12 +1557,19 @@ static void parseInlineFormatting(NSString *lineText, NSMutableString *outPlainT
             else if ([rest hasPrefix:@"mailto:"]) scheme = @"mailto:";
 
             if (scheme) {
-                // Find end of URL: consume until whitespace, ), ], or end of string
+                // Find end of URL: consume until whitespace or end of string
+                // Track balanced parentheses so URLs like https://en.wikipedia.org/wiki/Foo_(bar) work
                 NSUInteger urlEnd = i + scheme.length;
+                NSInteger parenDepth = 0;
                 while (urlEnd < len) {
                     unichar uc = [lineText characterAtIndex:urlEnd];
                     if (uc == ' ' || uc == '\t' || uc == '\n' || uc == '\r' ||
-                        uc == ')' || uc == ']' || uc == '>' || uc == 0xFF0C || uc == 0x3001) break;
+                        uc == ']' || uc == '>' || uc == 0xFF0C || uc == 0x3001) break;
+                    if (uc == '(') { parenDepth++; }
+                    else if (uc == ')') {
+                        if (parenDepth <= 0) break;  // unbalanced closing paren = end of URL
+                        parenDepth--;
+                    }
                     urlEnd++;
                 }
                 // Strip trailing punctuation that's likely not part of the URL

@@ -592,6 +592,16 @@ static int cmdSetAttr(id viewContext, NSString *identifier,
 
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("beginEditing"));
 
+    // Get the full plain string for paragraph-boundary splitting when applying links.
+    // ICTTMergeableString's setAttributes:range: can bleed link attributes into
+    // adjacent paragraphs when the range crosses a '\n' character.  We split any
+    // write that would cross a newline so each setAttributes:range: call stays
+    // within a single paragraph.
+    // Note: [ms string] returns the underlying NSMutableAttributedString, not a
+    // plain NSString; call -string on that attributed string to get the raw text.
+    id msAS = ((id (*)(id, SEL))objc_msgSend)(ms, sel_registerName("string"));
+    NSString *msStr = (msAS && [msAS respondsToSelector:@selector(string)]) ? [msAS string] : (NSString *)msAS;
+
     // Enumerate existing attribute runs in the target range (per-run patch strategy)
     NSUInteger idx = offset;
     NSUInteger end = offset + length;
@@ -604,61 +614,91 @@ static int cmdSetAttr(id viewContext, NSString *identifier,
         // Intersect effectiveRange with our target range
         NSUInteger subStart = MAX(effectiveRange.location, offset);
         NSUInteger subEnd = MIN(effectiveRange.location + effectiveRange.length, end);
-        NSRange subRange = NSMakeRange(subStart, subEnd - subStart);
 
-        // Build new attrs dict from existing (preserves TTStrikethrough, attachments, etc.)
-        NSMutableDictionary *patchedAttrs = [NSMutableDictionary dictionary];
-        for (NSString *key in existingAttrs) {
-            patchedAttrs[key] = existingAttrs[key];
-        }
+        // When a link operation is in play, further split the sub-range at every
+        // newline so that setAttributes:range: never crosses a paragraph boundary.
+        // For style-only operations (no link) the existing per-attribute-run loop
+        // is sufficient; paragraph styles are intentionally paragraph-scoped and
+        // ICTTMergeableString handles that correctly.
+        NSUInteger segStart = subStart;
+        while (segStart < subEnd) {
+            // Find the next newline within [segStart, subEnd)
+            NSRange searchRange = NSMakeRange(segStart, subEnd - segStart);
+            NSRange nlRange = (hasLinkOpt && msStr)
+                ? [msStr rangeOfString:@"\n" options:0 range:searchRange]
+                : NSMakeRange(NSNotFound, 0);
 
-        // Apply style delta if requested
-        if (hasStyleOpts) {
-            id style = [[ICTTParagraphStyleClass alloc] init];
-            // Start from existing style as base, then override requested fields
-            id existingStyle = existingAttrs[@"TTStyle"];
-            if (existingStyle) {
-                ((void (*)(id, SEL, NSInteger))objc_msgSend)(style, sel_registerName("setStyle:"),
-                    ((NSInteger (*)(id, SEL))objc_msgSend)(existingStyle, sel_registerName("style")));
-                ((void (*)(id, SEL, NSUInteger))objc_msgSend)(style, sel_registerName("setIndent:"),
-                    ((NSUInteger (*)(id, SEL))objc_msgSend)(existingStyle, sel_registerName("indent")));
-                id existingTodo = ((id (*)(id, SEL))objc_msgSend)(existingStyle, sel_registerName("todo"));
-                if (existingTodo) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(style, sel_registerName("setTodo:"), existingTodo);
+            // segEnd: stop just after the newline (inclusive) or at subEnd
+            NSUInteger segEnd = (nlRange.location != NSNotFound)
+                ? nlRange.location + 1  // include the '\n' in this segment
+                : subEnd;
+
+            NSRange segRange = NSMakeRange(segStart, segEnd - segStart);
+
+            // Re-fetch attributes at segStart so TTStyle reflects the paragraph
+            // that owns this segment (important when segStart != subStart, i.e.
+            // we have crossed into a new paragraph mid-run).
+            NSDictionary *segAttrs = (segStart == subStart)
+                ? existingAttrs
+                : ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                      ms, sel_registerName("attributesAtIndex:effectiveRange:"), segStart, &effectiveRange);
+
+            // Build new attrs dict from existing (preserves TTStrikethrough, attachments, etc.)
+            NSMutableDictionary *patchedAttrs = [NSMutableDictionary dictionary];
+            for (NSString *key in segAttrs) {
+                patchedAttrs[key] = segAttrs[key];
+            }
+
+            // Apply style delta if requested
+            if (hasStyleOpts) {
+                id style = [[ICTTParagraphStyleClass alloc] init];
+                // Start from existing style as base, then override requested fields
+                id existingStyle = segAttrs[@"TTStyle"];
+                if (existingStyle) {
+                    ((void (*)(id, SEL, NSInteger))objc_msgSend)(style, sel_registerName("setStyle:"),
+                        ((NSInteger (*)(id, SEL))objc_msgSend)(existingStyle, sel_registerName("style")));
+                    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(style, sel_registerName("setIndent:"),
+                        ((NSUInteger (*)(id, SEL))objc_msgSend)(existingStyle, sel_registerName("indent")));
+                    id existingTodo = ((id (*)(id, SEL))objc_msgSend)(existingStyle, sel_registerName("todo"));
+                    if (existingTodo) {
+                        ((void (*)(id, SEL, id))objc_msgSend)(style, sel_registerName("setTodo:"), existingTodo);
+                    }
+                }
+                if (attrOpts[@"style"]) {
+                    ((void (*)(id, SEL, NSInteger))objc_msgSend)(style, sel_registerName("setStyle:"),
+                        [attrOpts[@"style"] integerValue]);
+                }
+                if (attrOpts[@"indent"]) {
+                    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(style, sel_registerName("setIndent:"),
+                        [attrOpts[@"indent"] integerValue]);
+                }
+                if (attrOpts[@"todo-done"]) {
+                    BOOL done = [attrOpts[@"todo-done"] isEqualToString:@"true"];
+                    id todo = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
+                        [ICTTTodoClass alloc], sel_registerName("initWithIdentifier:done:"), [NSUUID UUID], done);
+                    ((void (*)(id, SEL, id))objc_msgSend)(style, sel_registerName("setTodo:"), todo);
+                    if (!attrOpts[@"style"]) {
+                        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(style, sel_registerName("setStyle:"), 103);
+                    }
+                }
+                patchedAttrs[@"TTStyle"] = style;
+            }
+
+            // Apply link delta if requested
+            if (hasLinkOpt) {
+                if (linkURL) {
+                    patchedAttrs[@"NSLink"] = linkURL;
+                } else {
+                    [patchedAttrs removeObjectForKey:@"NSLink"];
                 }
             }
-            if (attrOpts[@"style"]) {
-                ((void (*)(id, SEL, NSInteger))objc_msgSend)(style, sel_registerName("setStyle:"),
-                    [attrOpts[@"style"] integerValue]);
-            }
-            if (attrOpts[@"indent"]) {
-                ((void (*)(id, SEL, NSUInteger))objc_msgSend)(style, sel_registerName("setIndent:"),
-                    [attrOpts[@"indent"] integerValue]);
-            }
-            if (attrOpts[@"todo-done"]) {
-                BOOL done = [attrOpts[@"todo-done"] isEqualToString:@"true"];
-                id todo = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
-                    [ICTTTodoClass alloc], sel_registerName("initWithIdentifier:done:"), [NSUUID UUID], done);
-                ((void (*)(id, SEL, id))objc_msgSend)(style, sel_registerName("setTodo:"), todo);
-                if (!attrOpts[@"style"]) {
-                    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(style, sel_registerName("setStyle:"), 103);
-                }
-            }
-            patchedAttrs[@"TTStyle"] = style;
-        }
 
-        // Apply link delta if requested
-        if (hasLinkOpt) {
-            if (linkURL) {
-                patchedAttrs[@"NSLink"] = linkURL;
-            } else {
-                [patchedAttrs removeObjectForKey:@"NSLink"];
-            }
-        }
+            // Write back patched attrs for this segment (never crosses a '\n')
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
+                patchedAttrs, segRange);
 
-        // Write back patched attrs for this sub-range
-        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
-            patchedAttrs, subRange);
+            segStart = segEnd;
+        }
 
         idx = subEnd;
     }
@@ -3265,6 +3305,74 @@ static int cmdTest(id viewContext) {
                     multiOffset, multiLength, @{@"link": @""});
             } else { fprintf(stderr, "  FAIL (cmdSetAttr returned %d)\n", ret); failed++; }
         } else { fprintf(stderr, "  FAIL (no body text)\n"); failed++; }
+    }
+
+    // Test: Link at paragraph boundary does not bleed into adjacent paragraph
+    // Regression test for: set-attr --link breaks paragraph boundaries when
+    // offset+length crosses a '\n' character.
+    fprintf(stderr, "Test: Link at paragraph boundary preserves adjacent paragraph style...\n");
+    {
+        id note = findNote(viewContext, testTitle, testFolderName);
+        NSString *noteID = noteToDict(note)[@"id"];
+        NSString *noteText = [((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attributedString")) string];
+        // By this point Test 7 has replaced "Test body" with "Modified body".
+        // The body paragraph (style=3) is followed by '\n' then "Checklist item" (style=103).
+        // Set a link that ends right on (or just after) the '\n' to exercise the boundary.
+        NSRange bodyRange = [noteText rangeOfString:@"Modified body"];
+        NSRange clRange2 = [noteText rangeOfString:@"Checklist item"];
+        if (bodyRange.location != NSNotFound && clRange2.location != NSNotFound) {
+            id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+            id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+
+            // Record checklist paragraph style before applying link
+            NSRange erBefore;
+            NSDictionary *clBefore = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                ms, sel_registerName("attributesAtIndex:effectiveRange:"), clRange2.location, &erBefore);
+            id clStyleBefore = clBefore[@"TTStyle"];
+            int clStyleValBefore = clStyleBefore
+                ? (int)((NSInteger (*)(id, SEL))objc_msgSend)(clStyleBefore, sel_registerName("style")) : -1;
+            BOOL clHadTodoBefore = clStyleBefore
+                && (((id (*)(id, SEL))objc_msgSend)(clStyleBefore, sel_registerName("todo")) != nil);
+
+            // Apply link to "Modified body\n" — range deliberately includes the '\n'
+            NSUInteger linkLen = bodyRange.length + 1; // include trailing '\n'
+            int ret = cmdSetAttr(viewContext, noteID, bodyRange.location, linkLen,
+                @{@"link": @"https://boundary.example.com"});
+            if (ret == 0) {
+                note = findNote(viewContext, testTitle, testFolderName);
+                doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+                ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+                noteText = [((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attributedString")) string];
+                clRange2 = [noteText rangeOfString:@"Checklist item"];
+
+                NSRange erAfter;
+                NSDictionary *clAfter = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                    ms, sel_registerName("attributesAtIndex:effectiveRange:"), clRange2.location, &erAfter);
+                id clStyleAfter = clAfter[@"TTStyle"];
+                int clStyleValAfter = clStyleAfter
+                    ? (int)((NSInteger (*)(id, SEL))objc_msgSend)(clStyleAfter, sel_registerName("style")) : -1;
+                BOOL clHasTodoAfter = clStyleAfter
+                    && (((id (*)(id, SEL))objc_msgSend)(clStyleAfter, sel_registerName("todo")) != nil);
+                // The link must NOT have bled into the checklist paragraph
+                NSURL *clLinkAfter = clAfter[@"NSLink"];
+
+                if (clStyleValBefore == clStyleValAfter && clHadTodoBefore == clHasTodoAfter && !clLinkAfter) {
+                    fprintf(stderr, "  PASS (style=%d preserved, todo=%d, no link bleed)\n",
+                        clStyleValAfter, clHasTodoAfter); passed++;
+                } else {
+                    fprintf(stderr, "  FAIL (style %d->%d, todo %d->%d, link bleed=%s)\n",
+                        clStyleValBefore, clStyleValAfter, clHadTodoBefore, clHasTodoAfter,
+                        clLinkAfter ? "YES" : "no"); failed++;
+                }
+
+                // Clean up: remove link from body range
+                note = findNote(viewContext, testTitle, testFolderName);
+                noteText = [((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attributedString")) string];
+                bodyRange = [noteText rangeOfString:@"Modified body"];
+                cmdSetAttr(viewContext, noteToDict(note)[@"id"],
+                    bodyRange.location, bodyRange.length + 1, @{@"link": @""});
+            } else { fprintf(stderr, "  FAIL (cmdSetAttr returned %d)\n", ret); failed++; }
+        } else { fprintf(stderr, "  FAIL (body or checklist text not found)\n"); failed++; }
     }
 
     // Test: Link on checklist preserves todo state

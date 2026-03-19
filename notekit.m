@@ -49,7 +49,7 @@ static BOOL isStrictInteger(NSString *str, NSInteger *outValue) {
 }
 
 static BOOL isValidStyle(NSInteger style) {
-    return style == 0 || style == 1 || style == 3 || style == 100 || style == 102 || style == 103;
+    return style == 0 || style == 1 || style == 3 || style == 4 || style == 100 || style == 102 || style == 103;
 }
 
 static id makeParagraphStyle(NSInteger style) {
@@ -81,8 +81,21 @@ static void printJSON(id obj) {
 
 // --- Fetch Helpers ---
 
+// Predicate helpers to exclude soft-deleted items from Core Data queries.
+// markedForDeletion is set by ICFolder/ICNote.markForDeletion when items
+// are moved to Recently Deleted. folderType=1 is the Recently Deleted
+// system folder container itself.
+static NSPredicate *activeFolderPredicate(void) {
+    return [NSPredicate predicateWithFormat:@"markedForDeletion == NO AND folderType != 1"];
+}
+
+static NSPredicate *activeNotePredicate(void) {
+    return [NSPredicate predicateWithFormat:@"markedForDeletion == NO AND folder.markedForDeletion == NO"];
+}
+
 static NSArray *fetchFolders(id viewContext) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICFolder"];
+    request.predicate = activeFolderPredicate();
     NSError *error = nil;
     NSArray *folders = [viewContext executeFetchRequest:request error:&error];
     if (error) errorExit([NSString stringWithFormat:@"Failed to fetch folders: %@", error]);
@@ -92,12 +105,11 @@ static NSArray *fetchFolders(id viewContext) {
 static NSArray *fetchNotes(id viewContext, NSString *folderName, NSUInteger limit) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
     NSMutableArray *predicates = [NSMutableArray array];
+    [predicates addObject:activeNotePredicate()];
     if (folderName) {
         [predicates addObject:[NSPredicate predicateWithFormat:@"folder.title == %@", folderName]];
     }
-    if (predicates.count > 0) {
-        request.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:predicates];
-    }
+    request.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:predicates];
     request.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"modificationDate" ascending:NO]];
     if (limit > 0) request.fetchLimit = limit;
     NSError *error = nil;
@@ -110,11 +122,13 @@ static NSDictionary *noteToDict(id note); // forward declaration
 
 static NSArray *findNotes(id viewContext, NSString *title, NSString *folderName) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
+    NSMutableArray *predicates = [NSMutableArray array];
+    [predicates addObject:activeNotePredicate()];
+    [predicates addObject:[NSPredicate predicateWithFormat:@"title CONTAINS %@", title]];
     if (folderName) {
-        request.predicate = [NSPredicate predicateWithFormat:@"title CONTAINS %@ AND folder.title == %@", title, folderName];
-    } else {
-        request.predicate = [NSPredicate predicateWithFormat:@"title CONTAINS %@", title];
+        [predicates addObject:[NSPredicate predicateWithFormat:@"folder.title == %@", folderName]];
     }
+    request.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:predicates];
     NSError *error = nil;
     NSArray *notes = [viewContext executeFetchRequest:request error:&error];
     if (error || notes.count == 0) return @[];
@@ -146,7 +160,10 @@ static id requireSingleNote(id viewContext, NSString *title, NSString *folderNam
 
 static id findNoteByID(id viewContext, NSString *identifier) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
-    request.predicate = [NSPredicate predicateWithFormat:@"identifier == %@", identifier];
+    request.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:@[
+        activeNotePredicate(),
+        [NSPredicate predicateWithFormat:@"identifier == %@", identifier]
+    ]];
     request.fetchLimit = 1;
     NSError *error = nil;
     NSArray *notes = [viewContext executeFetchRequest:request error:&error];
@@ -560,10 +577,10 @@ static int cmdSetAttr(id viewContext, NSString *identifier,
     if (attrOpts[@"style"]) {
         NSInteger styleVal;
         if (!isStrictInteger(attrOpts[@"style"], &styleVal)) {
-            errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+            errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
         }
         if (!isValidStyle(styleVal)) {
-            errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+            errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
         }
     }
 
@@ -740,6 +757,7 @@ static int cmdMoveNote(id viewContext, NSString *identifier, NSString *toFolder)
 static int cmdSearch(id viewContext, NSString *query, NSString *folderName) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
     NSMutableArray *predicates = [NSMutableArray array];
+    [predicates addObject:activeNotePredicate()];
     [predicates addObject:[NSPredicate predicateWithFormat:@"title CONTAINS[cd] %@ OR snippet CONTAINS[cd] %@", query, query]];
     if (folderName) {
         [predicates addObject:[NSPredicate predicateWithFormat:@"folder.title == %@", folderName]];
@@ -1075,6 +1093,8 @@ static int cmdCreateEmpty(id viewContext, NSString *folderName) {
     return 0;
 }
 
+
+
 static int cmdDelete(id viewContext, NSString *identifier) {
     id note = findNoteByID(viewContext, identifier);
     if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", identifier]);
@@ -1100,6 +1120,49 @@ static void saveNote(id note, id viewContext, NSUInteger newLength, NSInteger de
     NSError *error = nil;
     [viewContext save:&error];
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
+}
+
+
+static int cmdCreate(id viewContext, NSString *folderName, NSString *title, NSString *body, NSInteger styleValue) {
+    id targetFolder = nil;
+    NSArray *folders = fetchFolders(viewContext);
+    for (id folder in folders) {
+        NSString *fname = ((id (*)(id, SEL))objc_msgSend)(folder, sel_registerName("title"));
+        if ([fname isEqualToString:folderName]) { targetFolder = folder; break; }
+    }
+    if (!targetFolder) errorExit([NSString stringWithFormat:@"Folder not found: %@", folderName]);
+
+    id note = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), targetFolder);
+    if (!note) errorExit(@"Failed to create note");
+
+    id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+    id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+    NSUInteger oldLen = ((NSUInteger (*)(id, SEL))objc_msgSend)(ms, sel_registerName("length"));
+
+    ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("beginEditing"));
+
+    // Insert title
+    ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"), title, oldLen);
+    id titleStyle = makeParagraphStyle(0); // style 0 = title
+    ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
+        @{@"TTStyle": titleStyle}, NSMakeRange(oldLen, title.length));
+
+    NSUInteger currentLen = oldLen + title.length;
+
+    if (body) {
+        NSString *toInsert = [NSString stringWithFormat:@"\n%@", body];
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"), toInsert, currentLen);
+        NSInteger actualStyle = (styleValue >= 0) ? styleValue : 3;
+        id bodyStyle = makeParagraphStyle(actualStyle);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": bodyStyle}, NSMakeRange(currentLen + 1, body.length));
+        currentLen += toInsert.length;
+    }
+
+    NSInteger delta = (NSInteger)(currentLen - oldLen);
+    saveNote(note, viewContext, currentLen, delta);
+    printJSON(noteToDict(note));
+    return 0;
 }
 
 static int cmdAppend(id viewContext, NSString *identifier, NSString *text, NSInteger styleValue) {
@@ -1407,7 +1470,10 @@ static NSArray *noteToParaModel(id note) {
             NSString *linkURL = nil;
             if (viewContext) {
                 NSFetchRequest *req = [[NSFetchRequest alloc] initWithEntityName:@"ICNote"];
-                req.predicate = [NSPredicate predicateWithFormat:@"title == %@", displayText];
+                req.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:@[
+                    activeNotePredicate(),
+                    [NSPredicate predicateWithFormat:@"title == %@", displayText]
+                ]];
                 req.fetchLimit = 1;
                 NSArray *results = [viewContext executeFetchRequest:req error:nil];
                 if (results.count > 0) {
@@ -1540,6 +1606,37 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
         if (rawText.length == 0 && style == 3) {
             // Empty body paragraph = blank line
             if (i > 0) [output appendString:@"\n"];
+            continue;
+        }
+
+        // Handle code block paragraphs (style 4) — no markdown escaping
+        if (style == 4) {
+            if (i > 0) [output appendString:@"\n"];
+            // Replace U+2028 line separators back to newlines
+            NSString *codeText = [rawText stringByReplacingOccurrencesOfString:@"\u2028" withString:@"\n"];
+            // Choose fence that won't conflict with code content
+            // Count max run of backticks in code text to determine fence length
+            NSUInteger maxBacktickRun = 0;
+            NSUInteger currentRun = 0;
+            for (NSUInteger ci = 0; ci < codeText.length; ci++) {
+                if ([codeText characterAtIndex:ci] == '`') {
+                    currentRun++;
+                    if (currentRun > maxBacktickRun) maxBacktickRun = currentRun;
+                } else {
+                    currentRun = 0;
+                }
+            }
+            NSUInteger fenceLen = MAX(3, maxBacktickRun + 1);
+            NSMutableString *fence = [NSMutableString string];
+            for (NSUInteger fi = 0; fi < fenceLen; fi++) [fence appendString:@"`"];
+
+            [output appendString:fence];
+            [output appendString:@"\n"];
+            if (codeText.length > 0) {
+                [output appendString:codeText];
+                [output appendString:@"\n"];
+            }
+            [output appendString:fence];
             continue;
         }
 
@@ -2019,8 +2116,80 @@ static NSArray *markdownToParaModel(NSString *markdown) {
 
     NSArray *lines = [normalized componentsSeparatedByString:@"\n"];
     NSMutableArray *paragraphs = [NSMutableArray array];
+    BOOL inCodeBlock = NO;
+    NSMutableString *codeBlockAccumulator = nil;
+    unichar fenceChar = 0;         // '`' or '~'
+    NSUInteger fenceLength = 0;    // length of opening fence
+    BOOL codeBlockFirstLine = YES;
 
-    for (NSString *line in lines) {
+    for (NSUInteger lineIdx = 0; lineIdx < lines.count; lineIdx++) {
+        NSString *line = lines[lineIdx];
+
+        // Check for fenced code block delimiter (``` or ~~~ optionally followed by info string)
+        if (!inCodeBlock) {
+            // Opening fence: 3+ consecutive backticks or tildes, optional info string
+            NSUInteger runLen = 0;
+            unichar fc = 0;
+            if (line.length >= 3) {
+                fc = [line characterAtIndex:0];
+                if (fc == '`' || fc == '~') {
+                    runLen = 1;
+                    while (runLen < line.length && [line characterAtIndex:runLen] == fc) runLen++;
+                }
+            }
+            if (runLen >= 3) {
+                // For backtick fences, info string must not contain backticks
+                BOOL validOpener = YES;
+                if (fc == '`') {
+                    NSString *rest = [line substringFromIndex:runLen];
+                    if ([rest rangeOfString:@"`"].location != NSNotFound) validOpener = NO;
+                }
+                if (validOpener) {
+                    inCodeBlock = YES;
+                    fenceChar = fc;
+                    fenceLength = runLen;
+                    codeBlockAccumulator = [NSMutableString string];
+                    codeBlockFirstLine = YES;
+                    continue;
+                }
+            }
+        } else {
+            // Closing fence: same char, >= opening length, only optional trailing spaces
+            NSUInteger runLen = 0;
+            if (line.length >= fenceLength && [line characterAtIndex:0] == fenceChar) {
+                runLen = 1;
+                while (runLen < line.length && [line characterAtIndex:runLen] == fenceChar) runLen++;
+                if (runLen >= fenceLength) {
+                    // Rest must be only spaces
+                    NSString *rest = [line substringFromIndex:runLen];
+                    NSString *trimmed = [rest stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                    if (trimmed.length == 0) {
+                        // Closing fence — emit accumulated code block as style 4 paragraph
+                        inCodeBlock = NO;
+                        NSMutableDictionary *para = [NSMutableDictionary dictionary];
+                        para[@"style"] = @(4);
+                        para[@"indent"] = @(0);
+                        para[@"text"] = [codeBlockAccumulator copy];
+                        [paragraphs addObject:para];
+                        codeBlockAccumulator = nil;
+                        fenceChar = 0;
+                        fenceLength = 0;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Inside a code block — accumulate lines with embedded newlines
+        if (inCodeBlock) {
+            if (!codeBlockFirstLine) {
+                [codeBlockAccumulator appendString:@"\n"];
+            }
+            [codeBlockAccumulator appendString:line];
+            codeBlockFirstLine = NO;
+            continue;
+        }
+
         NSMutableDictionary *para = [NSMutableDictionary dictionary];
         NSString *textContent = nil;
         NSInteger style = 3;
@@ -2112,8 +2281,10 @@ static NSArray *markdownToParaModel(NSString *markdown) {
             }
         }
 
-        // Convert <br> to U+2028 (soft line break) for write round-trip fidelity
+        // Convert <br> variants to U+2028 (soft line break) for write round-trip fidelity
         if (textContent) {
+            textContent = [textContent stringByReplacingOccurrencesOfString:@"<br />" withString:@"\u2028"];
+            textContent = [textContent stringByReplacingOccurrencesOfString:@"<br/>" withString:@"\u2028"];
             textContent = [textContent stringByReplacingOccurrencesOfString:@"<br>" withString:@"\u2028"];
         }
 
@@ -2127,6 +2298,15 @@ static NSArray *markdownToParaModel(NSString *markdown) {
         para[@"text"] = [plainText copy];
         if (style == 103) para[@"todoChecked"] = @(todoChecked);
         if (runs.count > 0) para[@"runs"] = runs;
+        [paragraphs addObject:para];
+    }
+
+    // Handle unclosed code block (missing closing ```)
+    if (inCodeBlock && codeBlockAccumulator) {
+        NSMutableDictionary *para = [NSMutableDictionary dictionary];
+        para[@"style"] = @(4);
+        para[@"indent"] = @(0);
+        para[@"text"] = [codeBlockAccumulator copy];
         [paragraphs addObject:para];
     }
 
@@ -2232,6 +2412,12 @@ static NSArray *computeParaOffsets(id note) {
     }
 
     return offsets;
+}
+
+// Convert para model text (which uses U+2028 for soft line breaks) to Apple Notes
+// storage format (which uses \n within a single attribute range).
+static NSString *storageTextForPara(NSString *text) {
+    return [text stringByReplacingOccurrencesOfString:@"\u2028" withString:@"\n"];
 }
 
 static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdown, BOOL dryRun, BOOL backup) {
@@ -2491,10 +2677,11 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
             NSString *oldText = oldPara[@"text"];
 
             if (![normalizeParaText(oldText) isEqualToString:normalizeParaText(newText)]) {
+                NSString *writeText = storageTextForPara(newText);
                 ((void (*)(id, SEL, NSRange))objc_msgSend)(ms, sel_registerName("deleteCharactersInRange:"),
                     NSMakeRange(pos, paraLen));
                 ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"),
-                    newText, pos);
+                    writeText, pos);
                 cumulativeDelta += (NSInteger)newText.length - (NSInteger)paraLen;
                 paraLen = newText.length;
             }
@@ -2610,7 +2797,7 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
         }
         else if ([opType isEqualToString:@"insert"]) {
             NSDictionary *newPara = op[@"newPara"];
-            NSString *newText = newPara[@"text"];
+            NSString *newText = storageTextForPara(newPara[@"text"]);
             NSString *toInsert = [NSString stringWithFormat:@"%@\n", newText];
 
             NSUInteger currentMsLenForInsert = (NSUInteger)((NSInteger)msLen + cumulativeDelta);
@@ -2844,16 +3031,43 @@ static int cmdTest(id viewContext) {
     NSString *testTitle = @"__notes_cli_test__";
     NSString *testTitle2 = @"__notes_cli_test_2__";
 
-    // Cleanup leftover test data
-    NSArray *folders = fetchFolders(viewContext);
-    for (id f in folders) {
-        NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
-        if ([fname isEqualToString:testFolderName]) {
-            Class ICFolder = NSClassFromString(@"ICFolder");
-            ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), f);
-            [viewContext save:nil];
-            fprintf(stderr, "Cleaned up leftover test folder\n");
-            break;
+    // Cleanup leftover test data — loop until no test folders remain (max 1000 iterations)
+    {
+        Class ICFolder = NSClassFromString(@"ICFolder");
+        int cleanedCount = 0;
+        int maxIter = 1000;
+        BOOL found = YES;
+        while (found && maxIter-- > 0) {
+            found = NO;
+            NSArray *allFolders = fetchFolders(viewContext);
+            for (id f in allFolders) {
+                NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
+                if ([fname isEqualToString:testFolderName] ||
+                    [fname isEqualToString:@"__notes_cli_test_folder_2__"]) {
+                    // deleteFolder: marks for CloudKit sync deletion (app layer).
+                    // deleteObject: removes from Core Data context so re-fetch won't return it.
+                    // Both are needed: deleteFolder: alone leaves stale context; deleteObject: alone skips sync.
+                    @try {
+                        ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), f);
+                    } @catch (id e) {
+                        fprintf(stderr, "Warning: deleteFolder: threw exception during cleanup\n");
+                    }
+                    [viewContext deleteObject:f];
+                    NSError *saveErr = nil;
+                    if (![viewContext save:&saveErr]) {
+                        fprintf(stderr, "Warning: save failed during cleanup: %s\n",
+                                [[saveErr localizedDescription] UTF8String]);
+                    }
+                    cleanedCount++;
+                    found = YES;
+                    break; // re-fetch after each delete to avoid stale references
+                }
+            }
+        }
+        if (maxIter <= 0) {
+            fprintf(stderr, "Warning: cleanup loop hit max iterations, %d folders deleted\n", cleanedCount);
+        } else if (cleanedCount > 0) {
+            fprintf(stderr, "Cleaned up %d leftover test folder(s)\n", cleanedCount);
         }
     }
 
@@ -3146,9 +3360,18 @@ static int cmdTest(id viewContext) {
             } else { fprintf(stderr, "  FAIL (not in target folder)\n"); failed++; }
         } else { fprintf(stderr, "  FAIL\n"); failed++; }
 
-        // Cleanup second folder
-        ((void (*)(id, SEL, id))objc_msgSend)(ICFolder2, sel_registerName("deleteFolder:"), tf2);
-        [viewContext save:nil];
+        // Cleanup second folder (deleteFolder: for sync, deleteObject: for context)
+        @try {
+            ((void (*)(id, SEL, id))objc_msgSend)(ICFolder2, sel_registerName("deleteFolder:"), tf2);
+        } @catch (id e) {
+            fprintf(stderr, "  Warning: deleteFolder: threw exception cleaning up folder_2\n");
+        }
+        [viewContext deleteObject:tf2];
+        NSError *saveErr11 = nil;
+        if (![viewContext save:&saveErr11]) {
+            fprintf(stderr, "  Warning: save failed cleaning up folder_2: %s\n",
+                    [[saveErr11 localizedDescription] UTF8String]);
+        }
     }
 
     // Test 11: Pin
@@ -3201,13 +3424,362 @@ static int cmdTest(id viewContext) {
         else { fprintf(stderr, "  FAIL\n"); failed++; }
     }
 
-    // --- JSON Output Shape Tests (subprocess) ---
+    // --- JSON Output Shape + Error Path Tests (subprocess) ---
 
     char rawExePath[PATH_MAX];
     char exePath[PATH_MAX];
     uint32_t exeSize = sizeof(rawExePath);
     _NSGetExecutablePath(rawExePath, &exeSize);
-    realpath(rawExePath, exePath);
+    if (realpath(rawExePath, exePath) == NULL) {
+        fprintf(stderr, "ERROR: Could not resolve executable path\n");
+        return 1;
+    }
+
+    // --- Command Coverage Tests ---
+
+    // Helper: run subprocess and capture stdout
+    #define RUN_CAPTURE(cmdStr, outData) do { \
+        FILE *_fp = popen([(cmdStr) UTF8String], "r"); \
+        (outData) = [NSMutableData data]; \
+        if (_fp) { \
+            char _buf[4096]; size_t _n; \
+            while ((_n = fread(_buf, 1, sizeof(_buf), _fp)) > 0) [(outData) appendBytes:_buf length:_n]; \
+            pclose(_fp); \
+        } \
+    } while(0)
+
+    // Helper: run subprocess, check for non-zero exit and optional stderr text
+    #define RUN_EXPECT_FAIL(cmdStr, exitOk, stderrStr) do { \
+        NSString *_fullCmd = [NSString stringWithFormat:@"%@ 2>&1", (cmdStr)]; \
+        FILE *_fp = popen([_fullCmd UTF8String], "r"); \
+        NSMutableData *_out = [NSMutableData data]; \
+        if (_fp) { \
+            char _buf[4096]; size_t _n; \
+            while ((_n = fread(_buf, 1, sizeof(_buf), _fp)) > 0) [_out appendBytes:_buf length:_n]; \
+            int _status = pclose(_fp); \
+            NSString *_output = [[NSString alloc] initWithData:_out encoding:NSUTF8StringEncoding]; \
+            (exitOk) = WIFEXITED(_status) && WEXITSTATUS(_status) != 0; \
+            if ((stderrStr) != nil) (exitOk) = (exitOk) && _output && [_output containsString:(stderrStr)]; \
+        } else { (exitOk) = NO; } \
+    } while(0)
+
+    // Test: cmdRead via subprocess (verify plain text output)
+    fprintf(stderr, "Test: cmdRead output...\n");
+    {
+        id noteR = findNote(viewContext, testTitle, testFolderName);
+        if (noteR) {
+            NSString *noteRId = noteToDict(noteR)[@"id"];
+            NSString *readCmd = [NSString stringWithFormat:@"'%s' read --id '%@' 2>/dev/null", exePath, noteRId];
+            NSMutableData *readData;
+            RUN_CAPTURE(readCmd, readData);
+            NSString *readOutput = [[NSString alloc] initWithData:readData encoding:NSUTF8StringEncoding];
+            if (readOutput && [readOutput containsString:@"Modified body"]) {
+                fprintf(stderr, "  PASS\n"); passed++;
+            } else { fprintf(stderr, "  FAIL (output: %s)\n", readOutput ? [readOutput UTF8String] : "nil"); failed++; }
+        } else { fprintf(stderr, "  FAIL (note not found)\n"); failed++; }
+    }
+
+    // Test: cmdReadAttrs via subprocess (verify JSON array shape)
+    fprintf(stderr, "Test: cmdReadAttrs JSON shape...\n");
+    {
+        id noteRA = findNote(viewContext, testTitle, testFolderName);
+        if (noteRA) {
+            NSString *noteRAId = noteToDict(noteRA)[@"id"];
+            NSString *raCmd = [NSString stringWithFormat:@"'%s' read-attrs --id '%@' 2>/dev/null", exePath, noteRAId];
+            NSMutableData *raData;
+            RUN_CAPTURE(raCmd, raData);
+            NSArray *raArr = [NSJSONSerialization JSONObjectWithData:raData options:0 error:nil];
+            BOOL raOk = [raArr isKindOfClass:[NSArray class]] && raArr.count > 0;
+            if (raOk) {
+                for (NSDictionary *raEntry in raArr) {
+                    if (![raEntry isKindOfClass:[NSDictionary class]]) { raOk = NO; break; }
+                    if (![raEntry[@"offset"] isKindOfClass:[NSNumber class]]) { raOk = NO; break; }
+                    if (![raEntry[@"length"] isKindOfClass:[NSNumber class]]) { raOk = NO; break; }
+                    if (![raEntry[@"text"] isKindOfClass:[NSString class]]) { raOk = NO; break; }
+                }
+            }
+            if (raOk) { fprintf(stderr, "  PASS (%lu entries)\n", (unsigned long)raArr.count); passed++; }
+            else { fprintf(stderr, "  FAIL (invalid JSON shape)\n"); failed++; }
+        } else { fprintf(stderr, "  FAIL (note not found)\n"); failed++; }
+    }
+
+    // Test: cmdInsert (direct function call — avoids CoreData contention)
+    fprintf(stderr, "Test: cmdInsert...\n");
+    {
+        id noteForInsert = findNote(viewContext, testTitle, testFolderName);
+        if (noteForInsert) {
+            NSString *insertID = noteToDict(noteForInsert)[@"id"];
+            NSUInteger insertBodyOff = bodyOffsetForNote(noteForInsert);
+            int ret = cmdInsert(viewContext, insertID, @"INSERTED_TEXT ", insertBodyOff, NO, -1);
+            if (ret == 0) {
+                id noteAfter = findNoteByID(viewContext, insertID);
+                NSString *bodyAfter = ((id (*)(id, SEL))objc_msgSend)(noteAfter, sel_registerName("noteAsPlainTextWithoutTitle"));
+                if ([bodyAfter containsString:@"INSERTED_TEXT"]) {
+                    fprintf(stderr, "  PASS\n"); passed++;
+                } else { fprintf(stderr, "  FAIL (text not found)\n"); failed++; }
+            } else { fprintf(stderr, "  FAIL (cmdInsert returned %d)\n", ret); failed++; }
+        } else { fprintf(stderr, "  FAIL (note not found)\n"); failed++; }
+    }
+
+    // Test: cmdDeleteRange (direct function call — avoids CoreData contention)
+    fprintf(stderr, "Test: cmdDeleteRange...\n");
+    {
+        id noteForDelete = findNote(viewContext, testTitle, testFolderName);
+        if (noteForDelete) {
+            NSString *deleteID = noteToDict(noteForDelete)[@"id"];
+            NSUInteger deleteBodyOff = bodyOffsetForNote(noteForDelete);
+            int ret = cmdDeleteRange(viewContext, deleteID, deleteBodyOff, 14, NO);
+            if (ret == 0) {
+                id noteAfter = findNoteByID(viewContext, deleteID);
+                NSString *bodyAfter = ((id (*)(id, SEL))objc_msgSend)(noteAfter, sel_registerName("noteAsPlainTextWithoutTitle"));
+                if (![bodyAfter containsString:@"INSERTED_TEXT"]) {
+                    fprintf(stderr, "  PASS\n"); passed++;
+                } else { fprintf(stderr, "  FAIL (text still in body)\n"); failed++; }
+            } else { fprintf(stderr, "  FAIL (cmdDeleteRange returned %d)\n", ret); failed++; }
+        } else { fprintf(stderr, "  FAIL (note not found)\n"); failed++; }
+    }
+
+    // Test: toggle-checkbox via write-markdown
+    fprintf(stderr, "Test: toggle-checkbox...\n");
+    {
+        id toggleNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id toggleDoc = ((id (*)(id, SEL))objc_msgSend)(toggleNote, sel_registerName("document"));
+        id toggleMs = ((id (*)(id, SEL))objc_msgSend)(toggleDoc, sel_registerName("mergeableString"));
+        NSString *toggleTitle = @"__toggle_test__";
+        ((void (*)(id, SEL))objc_msgSend)(toggleNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(toggleMs, sel_registerName("insertString:atIndex:"), toggleTitle, 0);
+        id toggleS0 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(toggleS0, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(toggleMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": toggleS0}, NSMakeRange(0, toggleTitle.length));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            toggleNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, toggleTitle.length), toggleTitle.length);
+        ((void (*)(id, SEL))objc_msgSend)(toggleNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(toggleNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSString *toggleID = noteToDict(toggleNote)[@"id"];
+        cmdAppend(viewContext, toggleID, @"Unchecked item", 103);
+        toggleNote = findNoteByID(viewContext, toggleID);
+
+        id tDoc = ((id (*)(id, SEL))objc_msgSend)(toggleNote, sel_registerName("document"));
+        id tMs = ((id (*)(id, SEL))objc_msgSend)(tDoc, sel_registerName("mergeableString"));
+        NSString *tText = [((id (*)(id, SEL))objc_msgSend)(toggleNote, sel_registerName("attributedString")) string];
+        BOOL startedUnchecked = NO;
+        NSUInteger ti = 0;
+        while (ti < tText.length) {
+            NSRange tr;
+            NSDictionary *ta = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                tMs, sel_registerName("attributesAtIndex:effectiveRange:"), ti, &tr);
+            id tStyle = ta[@"TTStyle"];
+            if (tStyle) {
+                int tsv = (int)((NSInteger (*)(id, SEL))objc_msgSend)(tStyle, sel_registerName("style"));
+                if (tsv == 103) {
+                    id ttodo = ((id (*)(id, SEL))objc_msgSend)(tStyle, sel_registerName("todo"));
+                    if (ttodo && !((BOOL (*)(id, SEL))objc_msgSend)(ttodo, sel_registerName("done"))) {
+                        startedUnchecked = YES;
+                    }
+                }
+            }
+            ti = tr.location + tr.length;
+        }
+
+        NSString *checkedMd = [NSString stringWithFormat:@"# %@\n- [x] Unchecked item\n", toggleTitle];
+        cmdWriteMarkdownWithString(toggleNote, viewContext, checkedMd, NO, NO);
+
+        toggleNote = findNoteByID(viewContext, toggleID);
+        tDoc = ((id (*)(id, SEL))objc_msgSend)(toggleNote, sel_registerName("document"));
+        tMs = ((id (*)(id, SEL))objc_msgSend)(tDoc, sel_registerName("mergeableString"));
+        tText = [((id (*)(id, SEL))objc_msgSend)(toggleNote, sel_registerName("attributedString")) string];
+        BOOL isNowChecked = NO;
+        ti = 0;
+        while (ti < tText.length) {
+            NSRange tr;
+            NSDictionary *ta = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                tMs, sel_registerName("attributesAtIndex:effectiveRange:"), ti, &tr);
+            id tStyle = ta[@"TTStyle"];
+            if (tStyle) {
+                int tsv = (int)((NSInteger (*)(id, SEL))objc_msgSend)(tStyle, sel_registerName("style"));
+                if (tsv == 103) {
+                    id ttodo = ((id (*)(id, SEL))objc_msgSend)(tStyle, sel_registerName("todo"));
+                    if (ttodo && ((BOOL (*)(id, SEL))objc_msgSend)(ttodo, sel_registerName("done"))) {
+                        isNowChecked = YES;
+                    }
+                }
+            }
+            ti = tr.location + tr.length;
+        }
+
+        if (startedUnchecked && isNowChecked) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (unchecked=%d checked=%d)\n", startedUnchecked, isNowChecked); failed++; }
+
+        deleteNote(findNoteByID(viewContext, toggleID), viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: cmdSearch via subprocess (verify JSON array shape and fields)
+    fprintf(stderr, "Test: cmdSearch JSON shape...\n");
+    {
+        NSString *scCmd = [NSString stringWithFormat:@"'%s' search --query '%@' --folder '%@' 2>/dev/null",
+            exePath, testTitle, testFolderName];
+        NSMutableData *scData;
+        RUN_CAPTURE(scCmd, scData);
+        NSArray *scArr = [NSJSONSerialization JSONObjectWithData:scData options:0 error:nil];
+        BOOL scOk = [scArr isKindOfClass:[NSArray class]] && scArr.count >= 1;
+        if (scOk) {
+            NSDictionary *scFirst = scArr[0];
+            scOk = [scFirst isKindOfClass:[NSDictionary class]]
+                && [scFirst[@"id"] isKindOfClass:[NSString class]]
+                && [scFirst[@"title"] isKindOfClass:[NSString class]]
+                && [scFirst[@"folder"] isKindOfClass:[NSString class]]
+                && [scFirst[@"createdAt"] isKindOfClass:[NSString class]]
+                && [scFirst[@"modifiedAt"] isKindOfClass:[NSString class]]
+                && [scFirst[@"hasChecklist"] isKindOfClass:[NSNumber class]]
+                && [scFirst[@"isPinned"] isKindOfClass:[NSNumber class]]
+                && [scFirst[@"snippet"] isKindOfClass:[NSString class]];
+        }
+        if (scOk) { fprintf(stderr, "  PASS (%lu results)\n", (unsigned long)scArr.count); passed++; }
+        else { fprintf(stderr, "  FAIL (invalid JSON or no results)\n"); failed++; }
+    }
+
+    // Test: noteToDict full field type validation
+    fprintf(stderr, "Test: noteToDict field types...\n");
+    {
+        id noteJS = findNote(viewContext, testTitle, testFolderName);
+        NSDictionary *jsDict = noteToDict(noteJS);
+        BOOL jsOk = YES;
+        if (![jsDict[@"title"] isKindOfClass:[NSString class]]) jsOk = NO;
+        if (![jsDict[@"body"] isKindOfClass:[NSString class]]) jsOk = NO;
+        if (![jsDict[@"folder"] isKindOfClass:[NSString class]]) jsOk = NO;
+        if (![jsDict[@"id"] isKindOfClass:[NSString class]]) jsOk = NO;
+        if (![jsDict[@"createdAt"] isKindOfClass:[NSString class]]) jsOk = NO;
+        if (![jsDict[@"modifiedAt"] isKindOfClass:[NSString class]]) jsOk = NO;
+        if (![jsDict[@"hasChecklist"] isKindOfClass:[NSNumber class]]) jsOk = NO;
+        if (![jsDict[@"isPinned"] isKindOfClass:[NSNumber class]]) jsOk = NO;
+        if (![jsDict[@"hasTags"] isKindOfClass:[NSNumber class]]) jsOk = NO;
+        if (![jsDict[@"snippet"] isKindOfClass:[NSString class]]) jsOk = NO;
+        if (![jsDict[@"url"] isKindOfClass:[NSString class]]) jsOk = NO;
+        if (jsOk) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (type mismatch)\n"); failed++; }
+    }
+
+    // Test: error — append to non-existent note (verify exit=1 and error message)
+    fprintf(stderr, "Test: error - append to non-existent note...\n");
+    {
+        NSString *e1Cmd = [NSString stringWithFormat:@"'%s' append --id 'NONEXISTENT_ID_12345' --text 'hello'", exePath];
+        BOOL e1Ok = NO;
+        RUN_EXPECT_FAIL(e1Cmd, e1Ok, @"Note not found");
+        if (e1Ok) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (expected exit=1 with 'Note not found')\n"); failed++; }
+    }
+
+    // Test: error — delete-range out of bounds (verify exit=1 and error message)
+    fprintf(stderr, "Test: error - delete-range out of bounds...\n");
+    {
+        id noteE2 = findNote(viewContext, testTitle, testFolderName);
+        if (noteE2) {
+            NSString *e2Id = noteToDict(noteE2)[@"id"];
+            NSString *e2Cmd = [NSString stringWithFormat:@"'%s' delete-range --id '%@' --start 99999 --length 1", exePath, e2Id];
+            BOOL e2Ok = NO;
+            RUN_EXPECT_FAIL(e2Cmd, e2Ok, @"Range exceeds");
+            if (e2Ok) { fprintf(stderr, "  PASS\n"); passed++; }
+            else { fprintf(stderr, "  FAIL (expected exit=1 with 'Range exceeds')\n"); failed++; }
+        } else { fprintf(stderr, "  FAIL (note not found)\n"); failed++; }
+    }
+
+    // Test: error — replace non-existent text (verify exit=1 and error message)
+    fprintf(stderr, "Test: error - replace non-existent text...\n");
+    {
+        id noteE3 = findNote(viewContext, testTitle, testFolderName);
+        if (noteE3) {
+            NSString *e3Id = noteToDict(noteE3)[@"id"];
+            NSString *e3Cmd = [NSString stringWithFormat:@"'%s' replace --id '%@' --search '__NONEXISTENT_TEXT_XYZ__' --replacement 'new'", exePath, e3Id];
+            BOOL e3Ok = NO;
+            RUN_EXPECT_FAIL(e3Cmd, e3Ok, @"Text not found");
+            if (e3Ok) { fprintf(stderr, "  PASS\n"); passed++; }
+            else { fprintf(stderr, "  FAIL (expected exit=1 with 'Text not found')\n"); failed++; }
+        } else { fprintf(stderr, "  FAIL (note not found)\n"); failed++; }
+    }
+
+    // --- Note Linking Tests (continued) ---
+
+    // Test: append to non-existent note
+    fprintf(stderr, "Test: append error (note not found)...\n");
+    {
+        NSString *cmd = [NSString stringWithFormat:@"'%s' append --id NONEXISTENT_NOTE_ID --text 'hello' 2>/dev/null", exePath];
+        int ret = system([cmd UTF8String]);
+        if (WIFEXITED(ret) && WEXITSTATUS(ret) == 1) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (expected exit 1, got status %d)\n", ret); failed++; }
+    }
+
+    // Test: delete-range with start beyond note length
+    fprintf(stderr, "Test: delete-range error (range exceeds length)...\n");
+    {
+        id noteForErr = findNote(viewContext, testTitle, testFolderName);
+        if (!noteForErr) { fprintf(stderr, "  FAIL (fixture note not found)\n"); failed++; }
+        else {
+            NSString *errId = noteToDict(noteForErr)[@"id"];
+            NSString *textBefore = [((id (*)(id, SEL))objc_msgSend)(noteForErr, sel_registerName("attributedString")) string];
+            NSString *cmd = [NSString stringWithFormat:@"'%s' delete-range --id '%@' --start 999999 --length 1 2>/dev/null", exePath, errId];
+            int ret = system([cmd UTF8String]);
+            id noteAfter = findNoteByID(viewContext, errId);
+            NSString *textAfter = [((id (*)(id, SEL))objc_msgSend)(noteAfter, sel_registerName("attributedString")) string];
+            if (WIFEXITED(ret) && WEXITSTATUS(ret) == 1 && [textBefore isEqualToString:textAfter]) {
+                fprintf(stderr, "  PASS\n"); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (exit=%d, content changed=%d)\n", ret, ![textBefore isEqualToString:textAfter]);
+                failed++;
+            }
+        }
+    }
+
+    // Test: delete-range with length exceeding remaining text
+    fprintf(stderr, "Test: delete-range error (length exceeds remaining)...\n");
+    {
+        id noteForErr = findNote(viewContext, testTitle, testFolderName);
+        if (!noteForErr) { fprintf(stderr, "  FAIL (fixture note not found)\n"); failed++; }
+        else {
+            NSString *errId = noteToDict(noteForErr)[@"id"];
+            NSString *cmd = [NSString stringWithFormat:@"'%s' delete-range --id '%@' --start 0 --length 999999 2>/dev/null", exePath, errId];
+            int ret = system([cmd UTF8String]);
+            if (WIFEXITED(ret) && WEXITSTATUS(ret) == 1) { fprintf(stderr, "  PASS\n"); passed++; }
+            else { fprintf(stderr, "  FAIL (expected exit 1, got status %d)\n", ret); failed++; }
+        }
+    }
+
+    // Test: replace with non-existent search text
+    fprintf(stderr, "Test: replace error (text not found)...\n");
+    {
+        id noteForErr = findNote(viewContext, testTitle, testFolderName);
+        if (!noteForErr) { fprintf(stderr, "  FAIL (fixture note not found)\n"); failed++; }
+        else {
+            NSString *errId = noteToDict(noteForErr)[@"id"];
+            NSString *cmd = [NSString stringWithFormat:@"'%s' replace --id '%@' --search '__NONEXISTENT_TEXT_XYZ__' --replacement 'new' 2>/dev/null", exePath, errId];
+            int ret = system([cmd UTF8String]);
+            if (WIFEXITED(ret) && WEXITSTATUS(ret) == 1) { fprintf(stderr, "  PASS\n"); passed++; }
+            else { fprintf(stderr, "  FAIL (expected exit 1, got status %d)\n", ret); failed++; }
+        }
+    }
+
+    // Test: replace on non-existent note
+    fprintf(stderr, "Test: replace error (note not found)...\n");
+    {
+        NSString *cmd = [NSString stringWithFormat:@"'%s' replace --id NONEXISTENT_NOTE_ID --search 'foo' --replacement 'bar' 2>/dev/null", exePath];
+        int ret = system([cmd UTF8String]);
+        if (WIFEXITED(ret) && WEXITSTATUS(ret) == 1) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (expected exit 1, got status %d)\n", ret); failed++; }
+    }
+
+    // Test: delete-range on non-existent note
+    fprintf(stderr, "Test: delete-range error (note not found)...\n");
+    {
+        NSString *cmd = [NSString stringWithFormat:@"'%s' delete-range --id NONEXISTENT_NOTE_ID --start 0 --length 1 2>/dev/null", exePath];
+        int ret = system([cmd UTF8String]);
+        if (WIFEXITED(ret) && WEXITSTATUS(ret) == 1) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (expected exit 1, got status %d)\n", ret); failed++; }
+    }
+
+    // --- Note Linking Tests ---
 
     // Test: cmdList JSON output shape (subprocess, all elements validated)
     fprintf(stderr, "Test: cmdList JSON shape...\n");
@@ -5042,6 +5614,167 @@ static int cmdTest(id viewContext) {
         [viewContext save:nil];
     }
 
+    // Test: markdown code block round-trip
+    fprintf(stderr, "Test: markdown code block round-trip...\n");
+    {
+        // Test 1: Simple single-line code block
+        NSString *md1 = @"# Title\n```\nmkdir -p ~/.config\n```\nSome body text";
+        NSArray *parsed1 = markdownToParaModel(md1);
+        BOOL ok = YES;
+        // Expect: title(style 0), code(style 4), body(style 3)
+        if (parsed1.count != 3) { ok = NO; fprintf(stderr, "    FAIL: expected 3 paragraphs, got %lu\n", (unsigned long)parsed1.count); }
+        else {
+            if ([parsed1[1][@"style"] integerValue] != 4) { ok = NO; fprintf(stderr, "    FAIL: code block style is %ld, expected 4\n", (long)[parsed1[1][@"style"] integerValue]); }
+            if (![parsed1[1][@"text"] isEqualToString:@"mkdir -p ~/.config"]) { ok = NO; fprintf(stderr, "    FAIL: code block text is '%s'\n", [parsed1[1][@"text"] UTF8String]); }
+        }
+
+        // Test 2: Multi-line code block (should be single paragraph with embedded newlines)
+        NSString *md2 = @"# Title\n```\nline 1\nline 2\nline 3\n```";
+        NSArray *parsed2 = markdownToParaModel(md2);
+        if (parsed2.count != 2) { ok = NO; fprintf(stderr, "    FAIL: multi-line: expected 2 paragraphs, got %lu\n", (unsigned long)parsed2.count); }
+        else {
+            if ([parsed2[1][@"style"] integerValue] != 4) { ok = NO; fprintf(stderr, "    FAIL: multi-line: style is %ld\n", (long)[parsed2[1][@"style"] integerValue]); }
+            if (![parsed2[1][@"text"] isEqualToString:@"line 1\nline 2\nline 3"]) { ok = NO; fprintf(stderr, "    FAIL: multi-line: text is '%s'\n", [parsed2[1][@"text"] UTF8String]); }
+        }
+
+        // Test 3: Round-trip: markdown -> model -> markdown
+        NSString *md3 = @"# Title\n```\necho hello\n```\nBody after code";
+        NSArray *parsed3 = markdownToParaModel(md3);
+        NSString *rt3 = paraModelToMarkdown(parsed3);
+        if (![rt3 isEqualToString:md3]) { ok = NO; fprintf(stderr, "    FAIL: round-trip mismatch:\n    got:  '%s'\n    want: '%s'\n", [rt3 UTF8String], [md3 UTF8String]); }
+
+        // Test 4: Code block with language specifier (```bash)
+        NSString *md4 = @"# Title\n```bash\necho hello\n```";
+        NSArray *parsed4 = markdownToParaModel(md4);
+        if (parsed4.count != 2) { ok = NO; fprintf(stderr, "    FAIL: lang spec: expected 2 paragraphs, got %lu\n", (unsigned long)parsed4.count); }
+        else {
+            if ([parsed4[1][@"style"] integerValue] != 4) { ok = NO; fprintf(stderr, "    FAIL: lang spec: style is %ld\n", (long)[parsed4[1][@"style"] integerValue]); }
+            if (![parsed4[1][@"text"] isEqualToString:@"echo hello"]) { ok = NO; fprintf(stderr, "    FAIL: lang spec: text is '%s'\n", [parsed4[1][@"text"] UTF8String]); }
+        }
+
+        // Test 5: Code block content not treated as markdown (e.g., # inside code block)
+        NSString *md5 = @"# Title\n```\n# Not a heading\n- Not a list\n1. Not numbered\n```";
+        NSArray *parsed5 = markdownToParaModel(md5);
+        if (parsed5.count != 2) { ok = NO; fprintf(stderr, "    FAIL: escape: expected 2 paragraphs, got %lu\n", (unsigned long)parsed5.count); }
+        else {
+            NSString *expected5 = @"# Not a heading\n- Not a list\n1. Not numbered";
+            if (![parsed5[1][@"text"] isEqualToString:expected5]) { ok = NO; fprintf(stderr, "    FAIL: escape: code text is '%s'\n", [parsed5[1][@"text"] UTF8String]); }
+        }
+
+        // Test 6: Multiple code blocks
+        NSString *md6 = @"# Title\n```\nblock 1\n```\nMiddle text\n```\nblock 2\n```";
+        NSArray *parsed6 = markdownToParaModel(md6);
+        if (parsed6.count != 4) { ok = NO; fprintf(stderr, "    FAIL: multiple: expected 4 paragraphs, got %lu\n", (unsigned long)parsed6.count); }
+        else {
+            if ([parsed6[1][@"style"] integerValue] != 4) { ok = NO; fprintf(stderr, "    FAIL: multiple: first block style %ld\n", (long)[parsed6[1][@"style"] integerValue]); }
+            if ([parsed6[3][@"style"] integerValue] != 4) { ok = NO; fprintf(stderr, "    FAIL: multiple: second block style %ld\n", (long)[parsed6[3][@"style"] integerValue]); }
+            if (![parsed6[1][@"text"] isEqualToString:@"block 1"]) { ok = NO; fprintf(stderr, "    FAIL: multiple: first block text '%s'\n", [parsed6[1][@"text"] UTF8String]); }
+            if (![parsed6[3][@"text"] isEqualToString:@"block 2"]) { ok = NO; fprintf(stderr, "    FAIL: multiple: second block text '%s'\n", [parsed6[3][@"text"] UTF8String]); }
+        }
+
+        // Test 7: Round-trip with multiple code blocks
+        NSString *rt6 = paraModelToMarkdown(parsed6);
+        if (![rt6 isEqualToString:md6]) { ok = NO; fprintf(stderr, "    FAIL: multiple round-trip:\n    got:  '%s'\n    want: '%s'\n", [rt6 UTF8String], [md6 UTF8String]); }
+
+        // Test 8: Empty code block
+        NSString *md8 = @"# Title\n```\n```\nBody";
+        NSArray *parsed8 = markdownToParaModel(md8);
+        if (parsed8.count != 3) { ok = NO; fprintf(stderr, "    FAIL: empty code block: expected 3 paragraphs, got %lu\n", (unsigned long)parsed8.count); }
+        else {
+            if ([parsed8[1][@"style"] integerValue] != 4) { ok = NO; fprintf(stderr, "    FAIL: empty code block: style is %ld\n", (long)[parsed8[1][@"style"] integerValue]); }
+            if (![parsed8[1][@"text"] isEqualToString:@""]) { ok = NO; fprintf(stderr, "    FAIL: empty code block: text is '%s', expected empty\n", [parsed8[1][@"text"] UTF8String]); }
+        }
+        // Empty code block round-trip
+        NSString *rt8 = paraModelToMarkdown(parsed8);
+        if (![rt8 isEqualToString:md8]) { ok = NO; fprintf(stderr, "    FAIL: empty code block round-trip:\n    got:  '%s'\n    want: '%s'\n", [rt8 UTF8String], [md8 UTF8String]); }
+
+        // Test 9: Leading empty line in code block
+        NSString *md9 = @"# Title\n```\n\nline after blank\n```";
+        NSArray *parsed9 = markdownToParaModel(md9);
+        if (parsed9.count != 2) { ok = NO; fprintf(stderr, "    FAIL: leading blank: expected 2 paragraphs, got %lu\n", (unsigned long)parsed9.count); }
+        else {
+            NSString *expected9 = @"\nline after blank";
+            if (![parsed9[1][@"text"] isEqualToString:expected9]) { ok = NO; fprintf(stderr, "    FAIL: leading blank: text is '%s', expected '%s'\n", [parsed9[1][@"text"] UTF8String], [expected9 UTF8String]); }
+        }
+
+        // Test 10: Code containing triple backtick-like lines (should not close fence)
+        NSString *md10 = @"# Title\n````\nSome ```code``` here\n````";
+        NSArray *parsed10 = markdownToParaModel(md10);
+        if (parsed10.count != 2) { ok = NO; fprintf(stderr, "    FAIL: backtick content: expected 2 paragraphs, got %lu\n", (unsigned long)parsed10.count); }
+        else {
+            if (![parsed10[1][@"text"] isEqualToString:@"Some ```code``` here"]) { ok = NO; fprintf(stderr, "    FAIL: backtick content: text is '%s'\n", [parsed10[1][@"text"] UTF8String]); }
+        }
+
+        // Test 11: Tilde fence
+        NSString *md11 = @"# Title\n~~~\ncode in tildes\n~~~";
+        NSArray *parsed11 = markdownToParaModel(md11);
+        if (parsed11.count != 2) { ok = NO; fprintf(stderr, "    FAIL: tilde fence: expected 2 paragraphs, got %lu\n", (unsigned long)parsed11.count); }
+        else {
+            if ([parsed11[1][@"style"] integerValue] != 4) { ok = NO; fprintf(stderr, "    FAIL: tilde fence: style is %ld\n", (long)[parsed11[1][@"style"] integerValue]); }
+            if (![parsed11[1][@"text"] isEqualToString:@"code in tildes"]) { ok = NO; fprintf(stderr, "    FAIL: tilde fence: text is '%s'\n", [parsed11[1][@"text"] UTF8String]); }
+        }
+
+        // Test 12: Closing fence must match opening char (backtick opened, tilde doesn't close)
+        NSString *md12 = @"# Title\n```\nline1\n~~~\nline2\n```";
+        NSArray *parsed12 = markdownToParaModel(md12);
+        if (parsed12.count != 2) { ok = NO; fprintf(stderr, "    FAIL: fence char mismatch: expected 2 paragraphs, got %lu\n", (unsigned long)parsed12.count); }
+        else {
+            NSString *expected12 = @"line1\n~~~\nline2";
+            if (![parsed12[1][@"text"] isEqualToString:expected12]) { ok = NO; fprintf(stderr, "    FAIL: fence char mismatch: text is '%s'\n", [parsed12[1][@"text"] UTF8String]); }
+        }
+
+        if (ok) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL\n"); failed++; }
+    }
+
+    // Test: write-markdown code block (end-to-end)
+    fprintf(stderr, "Test: write-markdown code block...\n");
+    {
+        // Create a note and write markdown with a code block
+        id cbNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        NSString *cbTitle = @"__code_block_test__";
+        id cbDoc = ((id (*)(id, SEL))objc_msgSend)(cbNote, sel_registerName("document"));
+        id cbMs = ((id (*)(id, SEL))objc_msgSend)(cbDoc, sel_registerName("mergeableString"));
+        ((void (*)(id, SEL))objc_msgSend)(cbNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(cbMs, sel_registerName("insertString:atIndex:"), cbTitle, 0);
+        id cbS0 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(cbS0, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(cbMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": cbS0}, NSMakeRange(0, cbTitle.length));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            cbNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, cbTitle.length), cbTitle.length);
+        ((void (*)(id, SEL))objc_msgSend)(cbNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(cbNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        // Write markdown with code block
+        NSString *cbMarkdown = @"# __code_block_test__\n```\necho hello world\n```\nBody after code";
+        cmdWriteMarkdownWithString(cbNote, viewContext, cbMarkdown, NO, NO);
+
+        // Re-read the note and check the style
+        cbNote = findNoteByID(viewContext, noteToDict(cbNote)[@"id"]);
+        NSArray *cbModel = noteToParaModel(cbNote);
+        BOOL cbOk = NO;
+        for (NSDictionary *p in cbModel) {
+            if ([p[@"style"] integerValue] == 4 && [p[@"text"] isEqualToString:@"echo hello world"]) {
+                cbOk = YES;
+                break;
+            }
+        }
+
+        if (cbOk) { fprintf(stderr, "  PASS\n"); passed++; }
+        else {
+            fprintf(stderr, "  FAIL (style 4 paragraph not found)\n");
+            for (NSDictionary *p in cbModel) {
+                fprintf(stderr, "    style=%ld text='%s'\n", (long)[p[@"style"] integerValue], [p[@"text"] UTF8String]);
+            }
+            failed++;
+        }
+
+        deleteNote(cbNote, viewContext);
+        [viewContext save:nil];
+    }
+
     // Test: write-markdown no-change round-trip (subprocess)
     fprintf(stderr, "Test: write-markdown no-change round-trip...\n");
     {
@@ -6024,6 +6757,78 @@ static int cmdTest(id viewContext) {
         [viewContext save:nil];
     }
 
+    // Test 19: cmdCreate with title only
+    fprintf(stderr, "Test 19: cmdCreate with title only...\n");
+    {
+        NSString *createTitle = @"__create_test_title_only__";
+        int rc = cmdCreate(viewContext, testFolderName, createTitle, nil, -1);
+        id createdNote = findNote(viewContext, createTitle, testFolderName);
+        if (rc == 0 && createdNote) {
+            NSString *noteTitle = ((id (*)(id, SEL))objc_msgSend)(createdNote, sel_registerName("title"));
+            if ([noteTitle isEqualToString:createTitle]) {
+                fprintf(stderr, "  PASS\n"); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (title mismatch: %s)\n", [noteTitle UTF8String]); failed++;
+            }
+            deleteNote(createdNote, viewContext);
+            [viewContext save:nil];
+        } else {
+            fprintf(stderr, "  FAIL (create returned %d or note not found)\n", rc); failed++;
+        }
+    }
+
+    // Test 20: cmdCreate with title and body
+    fprintf(stderr, "Test 20: cmdCreate with title and body...\n");
+    {
+        NSString *createTitle = @"__create_test_with_body__";
+        NSString *createBody = @"This is the body text";
+        int rc = cmdCreate(viewContext, testFolderName, createTitle, createBody, -1);
+        id createdNote = findNote(viewContext, createTitle, testFolderName);
+        if (rc == 0 && createdNote) {
+            NSString *noteTitle = ((id (*)(id, SEL))objc_msgSend)(createdNote, sel_registerName("title"));
+            NSString *bodyText = ((id (*)(id, SEL))objc_msgSend)(createdNote, sel_registerName("noteAsPlainTextWithoutTitle"));
+            BOOL hasTitle = [noteTitle isEqualToString:createTitle];
+            BOOL hasBody = [bodyText containsString:createBody];
+            if (hasTitle && hasBody) {
+                fprintf(stderr, "  PASS\n"); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (title=%d body=%d)\n", hasTitle, hasBody); failed++;
+            }
+            deleteNote(createdNote, viewContext);
+            [viewContext save:nil];
+        } else {
+            fprintf(stderr, "  FAIL (create returned %d or note not found)\n", rc); failed++;
+        }
+    }
+
+    // Test 21: cmdCreate with title, body, and checklist style
+    fprintf(stderr, "Test 21: cmdCreate with body style...\n");
+    {
+        NSString *createTitle = @"__create_test_styled__";
+        NSString *createBody = @"Checklist item";
+        int rc = cmdCreate(viewContext, testFolderName, createTitle, createBody, 103);
+        id createdNote = findNote(viewContext, createTitle, testFolderName);
+        if (rc == 0 && createdNote) {
+            NSArray *paras = noteToParaModel(createdNote);
+            BOOL foundChecklist = NO;
+            for (NSDictionary *para in paras) {
+                if ([para[@"text"] containsString:@"Checklist item"] && [para[@"style"] integerValue] == 103) {
+                    foundChecklist = YES;
+                    break;
+                }
+            }
+            if (foundChecklist) {
+                fprintf(stderr, "  PASS\n"); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (checklist style not found in paragraphs)\n"); failed++;
+            }
+            deleteNote(createdNote, viewContext);
+            [viewContext save:nil];
+        } else {
+            fprintf(stderr, "  FAIL (create returned %d or note not found)\n", rc); failed++;
+        }
+    }
+
     // Test 19: Delete notes
     fprintf(stderr, "Test 19: Delete notes...\n");
     {
@@ -6038,8 +6843,8 @@ static int cmdTest(id viewContext) {
         else { fprintf(stderr, "  FAIL\n"); failed++; }
     }
 
-    // Test 20: Delete notes (already done above, this is the folder delete)
-    fprintf(stderr, "Test 20: Delete folder...\n");
+    // Test 19b: Clean up any remaining test notes before folder delete
+    fprintf(stderr, "Test 19b: Clean up remaining notes...\n");
     {
         id n1 = findNote(viewContext, testTitle, testFolderName);
         id n2 = findNote(viewContext, testTitle2, testFolderName);
@@ -6052,7 +6857,7 @@ static int cmdTest(id viewContext) {
         else { fprintf(stderr, "  FAIL\n"); failed++; }
     }
 
-    // Test 20: Delete folder (with retry for timing)
+    // Test 20: Delete folder (using deleteFolder: class method)
     fprintf(stderr, "Test 20: Delete folder...\n");
     {
         Class ICFolder = NSClassFromString(@"ICFolder");
@@ -6062,19 +6867,30 @@ static int cmdTest(id viewContext) {
             if ([fname isEqualToString:testFolderName]) { tf = f; break; }
         }
         if (tf) {
-            // Mark for deletion then delete from Core Data (same pattern as notes)
-            @try { ((void (*)(id, SEL))objc_msgSend)(tf, sel_registerName("markForDeletion")); } @catch (id e) {}
+            // deleteFolder: marks for CloudKit sync deletion (app layer).
+            // deleteObject: removes from Core Data context so re-fetch won't return it.
+            @try {
+                ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), tf);
+            } @catch (id e) {
+                fprintf(stderr, "  Warning: deleteFolder: threw exception\n");
+            }
             [viewContext deleteObject:tf];
-            [viewContext save:nil];
-            [viewContext processPendingChanges];
-            // Note: deleteFolder works (proven by cleanup at start of next run)
-            // but the current context cache still returns the object.
-            // Verify by checking if the object is invalidated/faulted.
-            BOOL deleted = [tf isDeleted] || [tf isFault];
-            if (deleted) { fprintf(stderr, "  PASS\n"); passed++; }
+            NSError *saveErr = nil;
+            if (![viewContext save:&saveErr]) {
+                fprintf(stderr, "  Warning: save failed: %s\n",
+                        [[saveErr localizedDescription] UTF8String]);
+            }
+            // Verify test folder is gone from Core Data context
+            BOOL foundTestFolder = NO;
+            for (id f in fetchFolders(viewContext)) {
+                NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
+                if ([fname isEqualToString:testFolderName]) {
+                    foundTestFolder = YES; break;
+                }
+            }
+            if (!foundTestFolder) { fprintf(stderr, "  PASS\n"); passed++; }
             else {
-                // Trust that it worked — cleanup at next run will confirm
-                fprintf(stderr, "  PASS (delete issued, verified on next run)\n"); passed++;
+                fprintf(stderr, "  FAIL (test folder still found after deletion)\n"); failed++;
             }
         } else { fprintf(stderr, "  FAIL (folder not found to delete)\n"); failed++; }
     }
@@ -6177,7 +6993,7 @@ static void usage(void) {
     fprintf(stderr, "notekit — read and edit Apple Notes via the NotesShared framework\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Data model: A note is a flat string with attribute ranges at character offsets.\n");
-    fprintf(stderr, "Each range has a style (0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist), indent level,\n");
+    fprintf(stderr, "Each range has a style (0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist), indent level,\n");
     fprintf(stderr, "and optional properties (todo-done, link, strikethrough). Use read-attrs to see\n");
     fprintf(stderr, "the raw attribute stream. All editing operates on character offsets.\n");
     fprintf(stderr, "\n");
@@ -6191,6 +7007,7 @@ static void usage(void) {
     fprintf(stderr, "  notekit read (--title <title> | --id <id>) [--folder <name>]\n");
     fprintf(stderr, "  notekit read-attrs (--title <title> | --id <id>) [--folder <name>]\n");
     fprintf(stderr, "  notekit create-empty --folder <name>\n");
+    fprintf(stderr, "  notekit create --folder <name> --title <title> [--body <text>] [--style <n>]\n");
     fprintf(stderr, "  notekit delete --id <id>\n");
     fprintf(stderr, "  notekit append --id <id> --text <text> [--style <n>]\n");
     fprintf(stderr, "  notekit insert --id <id> --text <text> --position <n> [--style <n>] [--body-offset]\n");
@@ -6398,6 +7215,21 @@ int main(int argc, const char *argv[]) {
             if (!folderName) { fprintf(stderr, "Error: --folder required\n"); usage(); return 1; }
             return cmdCreateEmpty(viewContext, folderName);
 
+        } else if ([command isEqualToString:@"create"]) {
+            if (!folderName) { fprintf(stderr, "Error: --folder required\n"); usage(); return 1; }
+            if (!kwTitle) { fprintf(stderr, "Error: --title required\n"); usage(); return 1; }
+            NSString *body = opts[@"body"];
+            NSInteger styleVal = -1;
+            if (opts[@"style"]) {
+                if (!isStrictInteger(opts[@"style"], &styleVal)) {
+                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                }
+                if (!isValidStyle(styleVal)) {
+                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                }
+            }
+            return cmdCreate(viewContext, folderName, kwTitle, body, styleVal);
+
         } else if ([command isEqualToString:@"delete"]) {
             NSString *noteID = opts[@"id"];
             if (!noteID || noteID.length == 0) { fprintf(stderr, "Error: --id required\n"); usage(); return 1; }
@@ -6410,10 +7242,10 @@ int main(int argc, const char *argv[]) {
             NSInteger styleVal = -1;
             if (opts[@"style"]) {
                 if (!isStrictInteger(opts[@"style"], &styleVal)) {
-                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
                 }
                 if (!isValidStyle(styleVal)) {
-                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
                 }
             }
             return cmdAppend(viewContext, noteID, kwText, styleVal);
@@ -6426,10 +7258,10 @@ int main(int argc, const char *argv[]) {
             NSInteger styleVal = -1;
             if (opts[@"style"]) {
                 if (!isStrictInteger(opts[@"style"], &styleVal)) {
-                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
                 }
                 if (!isValidStyle(styleVal)) {
-                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
                 }
             }
             return cmdInsert(viewContext, noteID, kwText, [opts[@"position"] integerValue],

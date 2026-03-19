@@ -99,8 +99,21 @@ static void printJSON(id obj) {
 
 // --- Fetch Helpers ---
 
+// Predicate helpers to exclude soft-deleted items from Core Data queries.
+// markedForDeletion is set by ICFolder/ICNote.markForDeletion when items
+// are moved to Recently Deleted. folderType=1 is the Recently Deleted
+// system folder container itself.
+static NSPredicate *activeFolderPredicate(void) {
+    return [NSPredicate predicateWithFormat:@"markedForDeletion == NO AND folderType != 1"];
+}
+
+static NSPredicate *activeNotePredicate(void) {
+    return [NSPredicate predicateWithFormat:@"markedForDeletion == NO AND folder.markedForDeletion == NO"];
+}
+
 static NSArray *fetchFolders(id viewContext) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICFolder"];
+    request.predicate = activeFolderPredicate();
     NSError *error = nil;
     NSArray *folders = [viewContext executeFetchRequest:request error:&error];
     if (error) errorExit([NSString stringWithFormat:@"Failed to fetch folders: %@", error]);
@@ -110,12 +123,11 @@ static NSArray *fetchFolders(id viewContext) {
 static NSArray *fetchNotes(id viewContext, NSString *folderName, NSUInteger limit) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
     NSMutableArray *predicates = [NSMutableArray array];
+    [predicates addObject:activeNotePredicate()];
     if (folderName) {
         [predicates addObject:[NSPredicate predicateWithFormat:@"folder.title == %@", folderName]];
     }
-    if (predicates.count > 0) {
-        request.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:predicates];
-    }
+    request.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:predicates];
     request.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"modificationDate" ascending:NO]];
     if (limit > 0) request.fetchLimit = limit;
     NSError *error = nil;
@@ -126,11 +138,13 @@ static NSArray *fetchNotes(id viewContext, NSString *folderName, NSUInteger limi
 
 static id findNote(id viewContext, NSString *title, NSString *folderName) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
+    NSMutableArray *predicates = [NSMutableArray array];
+    [predicates addObject:activeNotePredicate()];
+    [predicates addObject:[NSPredicate predicateWithFormat:@"title CONTAINS %@", title]];
     if (folderName) {
-        request.predicate = [NSPredicate predicateWithFormat:@"title CONTAINS %@ AND folder.title == %@", title, folderName];
-    } else {
-        request.predicate = [NSPredicate predicateWithFormat:@"title CONTAINS %@", title];
+        [predicates addObject:[NSPredicate predicateWithFormat:@"folder.title == %@", folderName]];
     }
+    request.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:predicates];
     request.fetchLimit = 1;
     NSError *error = nil;
     NSArray *notes = [viewContext executeFetchRequest:request error:&error];
@@ -483,6 +497,7 @@ static int cmdMoveNote(id viewContext, NSString *title, NSString *fromFolder, NS
 static int cmdSearch(id viewContext, NSString *query, NSString *folderName) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
     NSMutableArray *predicates = [NSMutableArray array];
+    [predicates addObject:activeNotePredicate()];
     [predicates addObject:[NSPredicate predicateWithFormat:@"title CONTAINS[cd] %@ OR snippet CONTAINS[cd] %@", query, query]];
     if (folderName) {
         [predicates addObject:[NSPredicate predicateWithFormat:@"folder.title == %@", folderName]];
@@ -800,16 +815,43 @@ static int cmdTest(id viewContext) {
     NSString *testTitle = @"__notes_cli_test__";
     NSString *testTitle2 = @"__notes_cli_test_2__";
 
-    // Cleanup leftover test data
-    NSArray *folders = fetchFolders(viewContext);
-    for (id f in folders) {
-        NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
-        if ([fname isEqualToString:testFolderName]) {
-            Class ICFolder = NSClassFromString(@"ICFolder");
-            ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), f);
-            [viewContext save:nil];
-            fprintf(stderr, "Cleaned up leftover test folder\\n");
-            break;
+    // Cleanup leftover test data — loop until no test folders remain (max 1000 iterations)
+    {
+        Class ICFolder = NSClassFromString(@"ICFolder");
+        int cleanedCount = 0;
+        int maxIter = 1000;
+        BOOL found = YES;
+        while (found && maxIter-- > 0) {
+            found = NO;
+            NSArray *allFolders = fetchFolders(viewContext);
+            for (id f in allFolders) {
+                NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
+                if ([fname isEqualToString:testFolderName] ||
+                    [fname isEqualToString:@"__notes_cli_test_folder_2__"]) {
+                    // deleteFolder: marks for CloudKit sync deletion (app layer).
+                    // deleteObject: removes from Core Data context so re-fetch won't return it.
+                    // Both are needed: deleteFolder: alone leaves stale context; deleteObject: alone skips sync.
+                    @try {
+                        ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), f);
+                    } @catch (id e) {
+                        fprintf(stderr, "Warning: deleteFolder: threw exception during cleanup\\n");
+                    }
+                    [viewContext deleteObject:f];
+                    NSError *saveErr = nil;
+                    if (![viewContext save:&saveErr]) {
+                        fprintf(stderr, "Warning: save failed during cleanup: %s\\n",
+                                [[saveErr localizedDescription] UTF8String]);
+                    }
+                    cleanedCount++;
+                    found = YES;
+                    break; // re-fetch after each delete to avoid stale references
+                }
+            }
+        }
+        if (maxIter <= 0) {
+            fprintf(stderr, "Warning: cleanup loop hit max iterations, %d folders deleted\\n", cleanedCount);
+        } else if (cleanedCount > 0) {
+            fprintf(stderr, "Cleaned up %d leftover test folder(s)\\n", cleanedCount);
         }
     }
 
@@ -1093,9 +1135,18 @@ static int cmdTest(id viewContext) {
             } else { fprintf(stderr, "  FAIL (not in target folder)\\n"); failed++; }
         } else { fprintf(stderr, "  FAIL\\n"); failed++; }
 
-        // Cleanup second folder
-        ((void (*)(id, SEL, id))objc_msgSend)(ICFolder2, sel_registerName("deleteFolder:"), tf2);
-        [viewContext save:nil];
+        // Cleanup second folder (deleteFolder: for sync, deleteObject: for context)
+        @try {
+            ((void (*)(id, SEL, id))objc_msgSend)(ICFolder2, sel_registerName("deleteFolder:"), tf2);
+        } @catch (id e) {
+            fprintf(stderr, "  Warning: deleteFolder: threw exception cleaning up folder_2\\n");
+        }
+        [viewContext deleteObject:tf2];
+        NSError *saveErr11 = nil;
+        if (![viewContext save:&saveErr11]) {
+            fprintf(stderr, "  Warning: save failed cleaning up folder_2: %s\\n",
+                    [[saveErr11 localizedDescription] UTF8String]);
+        }
     }
 
     // Test 11: Pin
@@ -1233,8 +1284,8 @@ static int cmdTest(id viewContext) {
         else { fprintf(stderr, "  FAIL\\n"); failed++; }
     }
 
-    // Test 20: Delete notes (already done above, this is the folder delete)
-    fprintf(stderr, "Test 20: Delete folder...\\n");
+    // Test 19b: Clean up any remaining test notes before folder delete
+    fprintf(stderr, "Test 19b: Clean up remaining notes...\\n");
     {
         id n1 = findNote(viewContext, testTitle, testFolderName);
         id n2 = findNote(viewContext, testTitle2, testFolderName);
@@ -1247,7 +1298,7 @@ static int cmdTest(id viewContext) {
         else { fprintf(stderr, "  FAIL\\n"); failed++; }
     }
 
-    // Test 20: Delete folder (with retry for timing)
+    // Test 20: Delete folder (using deleteFolder: class method)
     fprintf(stderr, "Test 20: Delete folder...\\n");
     {
         Class ICFolder = NSClassFromString(@"ICFolder");
@@ -1257,19 +1308,30 @@ static int cmdTest(id viewContext) {
             if ([fname isEqualToString:testFolderName]) { tf = f; break; }
         }
         if (tf) {
-            // Mark for deletion then delete from Core Data (same pattern as notes)
-            @try { ((void (*)(id, SEL))objc_msgSend)(tf, sel_registerName("markForDeletion")); } @catch (id e) {}
+            // deleteFolder: marks for CloudKit sync deletion (app layer).
+            // deleteObject: removes from Core Data context so re-fetch won't return it.
+            @try {
+                ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), tf);
+            } @catch (id e) {
+                fprintf(stderr, "  Warning: deleteFolder: threw exception\\n");
+            }
             [viewContext deleteObject:tf];
-            [viewContext save:nil];
-            [viewContext processPendingChanges];
-            // Note: deleteFolder works (proven by cleanup at start of next run)
-            // but the current context cache still returns the object.
-            // Verify by checking if the object is invalidated/faulted.
-            BOOL deleted = [tf isDeleted] || [tf isFault];
-            if (deleted) { fprintf(stderr, "  PASS\\n"); passed++; }
+            NSError *saveErr = nil;
+            if (![viewContext save:&saveErr]) {
+                fprintf(stderr, "  Warning: save failed: %s\\n",
+                        [[saveErr localizedDescription] UTF8String]);
+            }
+            // Verify test folder is gone from Core Data context
+            BOOL foundTestFolder = NO;
+            for (id f in fetchFolders(viewContext)) {
+                NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
+                if ([fname isEqualToString:testFolderName]) {
+                    foundTestFolder = YES; break;
+                }
+            }
+            if (!foundTestFolder) { fprintf(stderr, "  PASS\\n"); passed++; }
             else {
-                // Trust that it worked — cleanup at next run will confirm
-                fprintf(stderr, "  PASS (delete issued, verified on next run)\\n"); passed++;
+                fprintf(stderr, "  FAIL (test folder still found after deletion)\\n"); failed++;
             }
         } else { fprintf(stderr, "  FAIL (folder not found to delete)\\n"); failed++; }
     }

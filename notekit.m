@@ -81,9 +81,21 @@ static void printJSON(id obj) {
 
 // --- Fetch Helpers ---
 
+// Predicate helpers to exclude soft-deleted items from Core Data queries.
+// markedForDeletion is set by ICFolder/ICNote.markForDeletion when items
+// are moved to Recently Deleted. folderType=1 is the Recently Deleted
+// system folder container itself.
+static NSPredicate *activeFolderPredicate(void) {
+    return [NSPredicate predicateWithFormat:@"markedForDeletion == NO AND folderType != 1"];
+}
+
+static NSPredicate *activeNotePredicate(void) {
+    return [NSPredicate predicateWithFormat:@"markedForDeletion == NO AND folder.markedForDeletion == NO"];
+}
+
 static NSArray *fetchFolders(id viewContext) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICFolder"];
-    request.predicate = [NSPredicate predicateWithFormat:@"markedForDeletion == NO AND folderType != 1"];
+    request.predicate = activeFolderPredicate();
     NSError *error = nil;
     NSArray *folders = [viewContext executeFetchRequest:request error:&error];
     if (error) errorExit([NSString stringWithFormat:@"Failed to fetch folders: %@", error]);
@@ -93,7 +105,7 @@ static NSArray *fetchFolders(id viewContext) {
 static NSArray *fetchNotes(id viewContext, NSString *folderName, NSUInteger limit) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
     NSMutableArray *predicates = [NSMutableArray array];
-    [predicates addObject:[NSPredicate predicateWithFormat:@"markedForDeletion == NO"]];
+    [predicates addObject:activeNotePredicate()];
     if (folderName) {
         [predicates addObject:[NSPredicate predicateWithFormat:@"folder.title == %@", folderName]];
     }
@@ -110,11 +122,13 @@ static NSDictionary *noteToDict(id note); // forward declaration
 
 static NSArray *findNotes(id viewContext, NSString *title, NSString *folderName) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
+    NSMutableArray *predicates = [NSMutableArray array];
+    [predicates addObject:activeNotePredicate()];
+    [predicates addObject:[NSPredicate predicateWithFormat:@"title CONTAINS %@", title]];
     if (folderName) {
-        request.predicate = [NSPredicate predicateWithFormat:@"title CONTAINS %@ AND folder.title == %@", title, folderName];
-    } else {
-        request.predicate = [NSPredicate predicateWithFormat:@"title CONTAINS %@", title];
+        [predicates addObject:[NSPredicate predicateWithFormat:@"folder.title == %@", folderName]];
     }
+    request.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:predicates];
     NSError *error = nil;
     NSArray *notes = [viewContext executeFetchRequest:request error:&error];
     if (error || notes.count == 0) return @[];
@@ -146,7 +160,10 @@ static id requireSingleNote(id viewContext, NSString *title, NSString *folderNam
 
 static id findNoteByID(id viewContext, NSString *identifier) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
-    request.predicate = [NSPredicate predicateWithFormat:@"identifier == %@", identifier];
+    request.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:@[
+        activeNotePredicate(),
+        [NSPredicate predicateWithFormat:@"identifier == %@", identifier]
+    ]];
     request.fetchLimit = 1;
     NSError *error = nil;
     NSArray *notes = [viewContext executeFetchRequest:request error:&error];

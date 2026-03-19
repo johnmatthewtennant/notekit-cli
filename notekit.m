@@ -1662,18 +1662,7 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
             }
         }
 
-        if (i > 0) {
-            [output appendString:@"\n"];
-            // Add blank line before headings for proper markdown spacing
-            if ((style == 0 || style == 1) && i > 0) {
-                NSDictionary *prevPara = paragraphs[i - 1];
-                NSString *prevText = prevPara[@"text"];
-                NSInteger prevStyle = [prevPara[@"style"] integerValue];
-                if (!(prevStyle == 3 && prevText.length == 0)) {
-                    [output appendString:@"\n"];
-                }
-            }
-        }
+        if (i > 0) [output appendString:@"\n"];
         [output appendString:line];
     }
 
@@ -2010,25 +1999,7 @@ static NSArray *markdownToParaModel(NSString *markdown) {
         [paragraphs addObject:para];
     }
 
-    // Remove empty body paragraphs that immediately precede headings.
-    // These are formatting blank lines added by read-markdown for spacing,
-    // not content paragraphs. Keeping them would create extra empty paragraphs
-    // in the round-trip.
-    NSMutableArray *filtered = [NSMutableArray array];
-    for (NSUInteger fi = 0; fi < paragraphs.count; fi++) {
-        NSDictionary *p = paragraphs[fi];
-        NSInteger pStyle = [p[@"style"] integerValue];
-        NSString *pText = p[@"text"];
-        if (pStyle == 3 && pText.length == 0 && fi + 1 < paragraphs.count) {
-            NSInteger nextStyle = [paragraphs[fi + 1][@"style"] integerValue];
-            if (nextStyle == 0 || nextStyle == 1) {
-                continue; // Skip this empty paragraph — it's formatting before a heading
-            }
-        }
-        [filtered addObject:p];
-    }
-
-    return filtered;
+    return paragraphs;
 }
 
 // --- Diff Engine ---

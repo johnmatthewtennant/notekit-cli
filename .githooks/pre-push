@@ -1,6 +1,6 @@
 #!/bin/bash
-# Pre-push hook: ensure notekit.m is up to date with the generator.
-# Runs `make generate` and fails the push if notekit.m has uncommitted changes.
+# Pre-push hook: ensure notekit-generated.m is up to date with the generator.
+# Runs `make generate` and fails the push if notekit-generated.m has uncommitted changes.
 
 set -e
 
@@ -12,13 +12,13 @@ if ! make generate; then
     exit 1
 fi
 
-# Check if notekit.m has uncommitted changes
-if ! git diff --quiet -- notekit.m; then
+# Check if notekit-generated.m has uncommitted changes (unstaged or staged)
+if ! git diff --quiet -- notekit-generated.m || ! git diff --cached --quiet -- notekit-generated.m; then
     echo ""
-    echo "ERROR: notekit.m has uncommitted changes after running 'make generate'."
+    echo "ERROR: notekit-generated.m has uncommitted changes after running 'make generate'."
     echo "The generator output is out of sync with the committed file."
     echo ""
-    echo "To fix: commit the regenerated notekit.m, then push again."
+    echo "To fix: commit the regenerated notekit-generated.m, then push again."
     exit 1
 fi
 

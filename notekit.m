@@ -3277,13 +3277,91 @@ static int cmdTest(id viewContext) {
         else { fprintf(stderr, "  FAIL\n"); failed++; }
     }
 
-    // --- Note Linking Tests ---
+    // --- Error Path Tests (subprocess) ---
 
     char rawExePath[PATH_MAX];
     char exePath[PATH_MAX];
     uint32_t exeSize = sizeof(rawExePath);
     _NSGetExecutablePath(rawExePath, &exeSize);
     realpath(rawExePath, exePath);
+
+    // Test: append to non-existent note
+    fprintf(stderr, "Test: append error (note not found)...\n");
+    {
+        NSString *cmd = [NSString stringWithFormat:@"'%s' append --id NONEXISTENT_NOTE_ID --text 'hello' 2>/dev/null", exePath];
+        int ret = system([cmd UTF8String]);
+        if (WIFEXITED(ret) && WEXITSTATUS(ret) == 1) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (expected exit 1, got status %d)\n", ret); failed++; }
+    }
+
+    // Test: delete-range with start beyond note length
+    fprintf(stderr, "Test: delete-range error (range exceeds length)...\n");
+    {
+        id noteForErr = findNote(viewContext, testTitle, testFolderName);
+        if (!noteForErr) { fprintf(stderr, "  FAIL (fixture note not found)\n"); failed++; }
+        else {
+            NSString *errId = noteToDict(noteForErr)[@"id"];
+            NSString *textBefore = [((id (*)(id, SEL))objc_msgSend)(noteForErr, sel_registerName("attributedString")) string];
+            NSString *cmd = [NSString stringWithFormat:@"'%s' delete-range --id '%@' --start 999999 --length 1 2>/dev/null", exePath, errId];
+            int ret = system([cmd UTF8String]);
+            id noteAfter = findNoteByID(viewContext, errId);
+            NSString *textAfter = [((id (*)(id, SEL))objc_msgSend)(noteAfter, sel_registerName("attributedString")) string];
+            if (WIFEXITED(ret) && WEXITSTATUS(ret) == 1 && [textBefore isEqualToString:textAfter]) {
+                fprintf(stderr, "  PASS\n"); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (exit=%d, content changed=%d)\n", ret, ![textBefore isEqualToString:textAfter]);
+                failed++;
+            }
+        }
+    }
+
+    // Test: delete-range with length exceeding remaining text
+    fprintf(stderr, "Test: delete-range error (length exceeds remaining)...\n");
+    {
+        id noteForErr = findNote(viewContext, testTitle, testFolderName);
+        if (!noteForErr) { fprintf(stderr, "  FAIL (fixture note not found)\n"); failed++; }
+        else {
+            NSString *errId = noteToDict(noteForErr)[@"id"];
+            NSString *cmd = [NSString stringWithFormat:@"'%s' delete-range --id '%@' --start 0 --length 999999 2>/dev/null", exePath, errId];
+            int ret = system([cmd UTF8String]);
+            if (WIFEXITED(ret) && WEXITSTATUS(ret) == 1) { fprintf(stderr, "  PASS\n"); passed++; }
+            else { fprintf(stderr, "  FAIL (expected exit 1, got status %d)\n", ret); failed++; }
+        }
+    }
+
+    // Test: replace with non-existent search text
+    fprintf(stderr, "Test: replace error (text not found)...\n");
+    {
+        id noteForErr = findNote(viewContext, testTitle, testFolderName);
+        if (!noteForErr) { fprintf(stderr, "  FAIL (fixture note not found)\n"); failed++; }
+        else {
+            NSString *errId = noteToDict(noteForErr)[@"id"];
+            NSString *cmd = [NSString stringWithFormat:@"'%s' replace --id '%@' --search '__NONEXISTENT_TEXT_XYZ__' --replacement 'new' 2>/dev/null", exePath, errId];
+            int ret = system([cmd UTF8String]);
+            if (WIFEXITED(ret) && WEXITSTATUS(ret) == 1) { fprintf(stderr, "  PASS\n"); passed++; }
+            else { fprintf(stderr, "  FAIL (expected exit 1, got status %d)\n", ret); failed++; }
+        }
+    }
+
+    // Test: replace on non-existent note
+    fprintf(stderr, "Test: replace error (note not found)...\n");
+    {
+        NSString *cmd = [NSString stringWithFormat:@"'%s' replace --id NONEXISTENT_NOTE_ID --search 'foo' --replacement 'bar' 2>/dev/null", exePath];
+        int ret = system([cmd UTF8String]);
+        if (WIFEXITED(ret) && WEXITSTATUS(ret) == 1) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (expected exit 1, got status %d)\n", ret); failed++; }
+    }
+
+    // Test: delete-range on non-existent note
+    fprintf(stderr, "Test: delete-range error (note not found)...\n");
+    {
+        NSString *cmd = [NSString stringWithFormat:@"'%s' delete-range --id NONEXISTENT_NOTE_ID --start 0 --length 1 2>/dev/null", exePath];
+        int ret = system([cmd UTF8String]);
+        if (WIFEXITED(ret) && WEXITSTATUS(ret) == 1) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (expected exit 1, got status %d)\n", ret); failed++; }
+    }
+
+    // --- Note Linking Tests ---
 
     // Test: get-link
     fprintf(stderr, "Test: get-link...\n");

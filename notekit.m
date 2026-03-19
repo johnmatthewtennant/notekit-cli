@@ -49,7 +49,7 @@ static BOOL isStrictInteger(NSString *str, NSInteger *outValue) {
 }
 
 static BOOL isValidStyle(NSInteger style) {
-    return style == 0 || style == 1 || style == 3 || style == 100 || style == 102 || style == 103;
+    return style == 0 || style == 1 || style == 3 || style == 4 || style == 100 || style == 102 || style == 103;
 }
 
 static id makeParagraphStyle(NSInteger style) {
@@ -560,10 +560,10 @@ static int cmdSetAttr(id viewContext, NSString *identifier,
     if (attrOpts[@"style"]) {
         NSInteger styleVal;
         if (!isStrictInteger(attrOpts[@"style"], &styleVal)) {
-            errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+            errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
         }
         if (!isValidStyle(styleVal)) {
-            errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+            errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
         }
     }
 
@@ -1543,6 +1543,37 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
             continue;
         }
 
+        // Handle code block paragraphs (style 4) — no markdown escaping
+        if (style == 4) {
+            if (i > 0) [output appendString:@"\n"];
+            // Replace U+2028 line separators back to newlines
+            NSString *codeText = [rawText stringByReplacingOccurrencesOfString:@"\u2028" withString:@"\n"];
+            // Choose fence that won't conflict with code content
+            // Count max run of backticks in code text to determine fence length
+            NSUInteger maxBacktickRun = 0;
+            NSUInteger currentRun = 0;
+            for (NSUInteger ci = 0; ci < codeText.length; ci++) {
+                if ([codeText characterAtIndex:ci] == '`') {
+                    currentRun++;
+                    if (currentRun > maxBacktickRun) maxBacktickRun = currentRun;
+                } else {
+                    currentRun = 0;
+                }
+            }
+            NSUInteger fenceLen = MAX(3, maxBacktickRun + 1);
+            NSMutableString *fence = [NSMutableString string];
+            for (NSUInteger fi = 0; fi < fenceLen; fi++) [fence appendString:@"`"];
+
+            [output appendString:fence];
+            [output appendString:@"\n"];
+            if (codeText.length > 0) {
+                [output appendString:codeText];
+                [output appendString:@"\n"];
+            }
+            [output appendString:fence];
+            continue;
+        }
+
         // Build formatted text with inline runs
         NSString *formattedText;
         NSArray *runs = para[@"runs"];
@@ -2019,8 +2050,80 @@ static NSArray *markdownToParaModel(NSString *markdown) {
 
     NSArray *lines = [normalized componentsSeparatedByString:@"\n"];
     NSMutableArray *paragraphs = [NSMutableArray array];
+    BOOL inCodeBlock = NO;
+    NSMutableString *codeBlockAccumulator = nil;
+    unichar fenceChar = 0;         // '`' or '~'
+    NSUInteger fenceLength = 0;    // length of opening fence
+    BOOL codeBlockFirstLine = YES;
 
-    for (NSString *line in lines) {
+    for (NSUInteger lineIdx = 0; lineIdx < lines.count; lineIdx++) {
+        NSString *line = lines[lineIdx];
+
+        // Check for fenced code block delimiter (``` or ~~~ optionally followed by info string)
+        if (!inCodeBlock) {
+            // Opening fence: 3+ consecutive backticks or tildes, optional info string
+            NSUInteger runLen = 0;
+            unichar fc = 0;
+            if (line.length >= 3) {
+                fc = [line characterAtIndex:0];
+                if (fc == '`' || fc == '~') {
+                    runLen = 1;
+                    while (runLen < line.length && [line characterAtIndex:runLen] == fc) runLen++;
+                }
+            }
+            if (runLen >= 3) {
+                // For backtick fences, info string must not contain backticks
+                BOOL validOpener = YES;
+                if (fc == '`') {
+                    NSString *rest = [line substringFromIndex:runLen];
+                    if ([rest rangeOfString:@"`"].location != NSNotFound) validOpener = NO;
+                }
+                if (validOpener) {
+                    inCodeBlock = YES;
+                    fenceChar = fc;
+                    fenceLength = runLen;
+                    codeBlockAccumulator = [NSMutableString string];
+                    codeBlockFirstLine = YES;
+                    continue;
+                }
+            }
+        } else {
+            // Closing fence: same char, >= opening length, only optional trailing spaces
+            NSUInteger runLen = 0;
+            if (line.length >= fenceLength && [line characterAtIndex:0] == fenceChar) {
+                runLen = 1;
+                while (runLen < line.length && [line characterAtIndex:runLen] == fenceChar) runLen++;
+                if (runLen >= fenceLength) {
+                    // Rest must be only spaces
+                    NSString *rest = [line substringFromIndex:runLen];
+                    NSString *trimmed = [rest stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                    if (trimmed.length == 0) {
+                        // Closing fence — emit accumulated code block as style 4 paragraph
+                        inCodeBlock = NO;
+                        NSMutableDictionary *para = [NSMutableDictionary dictionary];
+                        para[@"style"] = @(4);
+                        para[@"indent"] = @(0);
+                        para[@"text"] = [codeBlockAccumulator copy];
+                        [paragraphs addObject:para];
+                        codeBlockAccumulator = nil;
+                        fenceChar = 0;
+                        fenceLength = 0;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Inside a code block — accumulate lines with embedded newlines
+        if (inCodeBlock) {
+            if (!codeBlockFirstLine) {
+                [codeBlockAccumulator appendString:@"\n"];
+            }
+            [codeBlockAccumulator appendString:line];
+            codeBlockFirstLine = NO;
+            continue;
+        }
+
         NSMutableDictionary *para = [NSMutableDictionary dictionary];
         NSString *textContent = nil;
         NSInteger style = 3;
@@ -2127,6 +2230,15 @@ static NSArray *markdownToParaModel(NSString *markdown) {
         para[@"text"] = [plainText copy];
         if (style == 103) para[@"todoChecked"] = @(todoChecked);
         if (runs.count > 0) para[@"runs"] = runs;
+        [paragraphs addObject:para];
+    }
+
+    // Handle unclosed code block (missing closing ```)
+    if (inCodeBlock && codeBlockAccumulator) {
+        NSMutableDictionary *para = [NSMutableDictionary dictionary];
+        para[@"style"] = @(4);
+        para[@"indent"] = @(0);
+        para[@"text"] = [codeBlockAccumulator copy];
         [paragraphs addObject:para];
     }
 
@@ -4818,6 +4930,167 @@ static int cmdTest(id viewContext) {
         [viewContext save:nil];
     }
 
+    // Test: markdown code block round-trip
+    fprintf(stderr, "Test: markdown code block round-trip...\n");
+    {
+        // Test 1: Simple single-line code block
+        NSString *md1 = @"# Title\n```\nmkdir -p ~/.config\n```\nSome body text";
+        NSArray *parsed1 = markdownToParaModel(md1);
+        BOOL ok = YES;
+        // Expect: title(style 0), code(style 4), body(style 3)
+        if (parsed1.count != 3) { ok = NO; fprintf(stderr, "    FAIL: expected 3 paragraphs, got %lu\n", (unsigned long)parsed1.count); }
+        else {
+            if ([parsed1[1][@"style"] integerValue] != 4) { ok = NO; fprintf(stderr, "    FAIL: code block style is %ld, expected 4\n", (long)[parsed1[1][@"style"] integerValue]); }
+            if (![parsed1[1][@"text"] isEqualToString:@"mkdir -p ~/.config"]) { ok = NO; fprintf(stderr, "    FAIL: code block text is '%s'\n", [parsed1[1][@"text"] UTF8String]); }
+        }
+
+        // Test 2: Multi-line code block (should be single paragraph with embedded newlines)
+        NSString *md2 = @"# Title\n```\nline 1\nline 2\nline 3\n```";
+        NSArray *parsed2 = markdownToParaModel(md2);
+        if (parsed2.count != 2) { ok = NO; fprintf(stderr, "    FAIL: multi-line: expected 2 paragraphs, got %lu\n", (unsigned long)parsed2.count); }
+        else {
+            if ([parsed2[1][@"style"] integerValue] != 4) { ok = NO; fprintf(stderr, "    FAIL: multi-line: style is %ld\n", (long)[parsed2[1][@"style"] integerValue]); }
+            if (![parsed2[1][@"text"] isEqualToString:@"line 1\nline 2\nline 3"]) { ok = NO; fprintf(stderr, "    FAIL: multi-line: text is '%s'\n", [parsed2[1][@"text"] UTF8String]); }
+        }
+
+        // Test 3: Round-trip: markdown -> model -> markdown
+        NSString *md3 = @"# Title\n```\necho hello\n```\nBody after code";
+        NSArray *parsed3 = markdownToParaModel(md3);
+        NSString *rt3 = paraModelToMarkdown(parsed3);
+        if (![rt3 isEqualToString:md3]) { ok = NO; fprintf(stderr, "    FAIL: round-trip mismatch:\n    got:  '%s'\n    want: '%s'\n", [rt3 UTF8String], [md3 UTF8String]); }
+
+        // Test 4: Code block with language specifier (```bash)
+        NSString *md4 = @"# Title\n```bash\necho hello\n```";
+        NSArray *parsed4 = markdownToParaModel(md4);
+        if (parsed4.count != 2) { ok = NO; fprintf(stderr, "    FAIL: lang spec: expected 2 paragraphs, got %lu\n", (unsigned long)parsed4.count); }
+        else {
+            if ([parsed4[1][@"style"] integerValue] != 4) { ok = NO; fprintf(stderr, "    FAIL: lang spec: style is %ld\n", (long)[parsed4[1][@"style"] integerValue]); }
+            if (![parsed4[1][@"text"] isEqualToString:@"echo hello"]) { ok = NO; fprintf(stderr, "    FAIL: lang spec: text is '%s'\n", [parsed4[1][@"text"] UTF8String]); }
+        }
+
+        // Test 5: Code block content not treated as markdown (e.g., # inside code block)
+        NSString *md5 = @"# Title\n```\n# Not a heading\n- Not a list\n1. Not numbered\n```";
+        NSArray *parsed5 = markdownToParaModel(md5);
+        if (parsed5.count != 2) { ok = NO; fprintf(stderr, "    FAIL: escape: expected 2 paragraphs, got %lu\n", (unsigned long)parsed5.count); }
+        else {
+            NSString *expected5 = @"# Not a heading\n- Not a list\n1. Not numbered";
+            if (![parsed5[1][@"text"] isEqualToString:expected5]) { ok = NO; fprintf(stderr, "    FAIL: escape: code text is '%s'\n", [parsed5[1][@"text"] UTF8String]); }
+        }
+
+        // Test 6: Multiple code blocks
+        NSString *md6 = @"# Title\n```\nblock 1\n```\nMiddle text\n```\nblock 2\n```";
+        NSArray *parsed6 = markdownToParaModel(md6);
+        if (parsed6.count != 4) { ok = NO; fprintf(stderr, "    FAIL: multiple: expected 4 paragraphs, got %lu\n", (unsigned long)parsed6.count); }
+        else {
+            if ([parsed6[1][@"style"] integerValue] != 4) { ok = NO; fprintf(stderr, "    FAIL: multiple: first block style %ld\n", (long)[parsed6[1][@"style"] integerValue]); }
+            if ([parsed6[3][@"style"] integerValue] != 4) { ok = NO; fprintf(stderr, "    FAIL: multiple: second block style %ld\n", (long)[parsed6[3][@"style"] integerValue]); }
+            if (![parsed6[1][@"text"] isEqualToString:@"block 1"]) { ok = NO; fprintf(stderr, "    FAIL: multiple: first block text '%s'\n", [parsed6[1][@"text"] UTF8String]); }
+            if (![parsed6[3][@"text"] isEqualToString:@"block 2"]) { ok = NO; fprintf(stderr, "    FAIL: multiple: second block text '%s'\n", [parsed6[3][@"text"] UTF8String]); }
+        }
+
+        // Test 7: Round-trip with multiple code blocks
+        NSString *rt6 = paraModelToMarkdown(parsed6);
+        if (![rt6 isEqualToString:md6]) { ok = NO; fprintf(stderr, "    FAIL: multiple round-trip:\n    got:  '%s'\n    want: '%s'\n", [rt6 UTF8String], [md6 UTF8String]); }
+
+        // Test 8: Empty code block
+        NSString *md8 = @"# Title\n```\n```\nBody";
+        NSArray *parsed8 = markdownToParaModel(md8);
+        if (parsed8.count != 3) { ok = NO; fprintf(stderr, "    FAIL: empty code block: expected 3 paragraphs, got %lu\n", (unsigned long)parsed8.count); }
+        else {
+            if ([parsed8[1][@"style"] integerValue] != 4) { ok = NO; fprintf(stderr, "    FAIL: empty code block: style is %ld\n", (long)[parsed8[1][@"style"] integerValue]); }
+            if (![parsed8[1][@"text"] isEqualToString:@""]) { ok = NO; fprintf(stderr, "    FAIL: empty code block: text is '%s', expected empty\n", [parsed8[1][@"text"] UTF8String]); }
+        }
+        // Empty code block round-trip
+        NSString *rt8 = paraModelToMarkdown(parsed8);
+        if (![rt8 isEqualToString:md8]) { ok = NO; fprintf(stderr, "    FAIL: empty code block round-trip:\n    got:  '%s'\n    want: '%s'\n", [rt8 UTF8String], [md8 UTF8String]); }
+
+        // Test 9: Leading empty line in code block
+        NSString *md9 = @"# Title\n```\n\nline after blank\n```";
+        NSArray *parsed9 = markdownToParaModel(md9);
+        if (parsed9.count != 2) { ok = NO; fprintf(stderr, "    FAIL: leading blank: expected 2 paragraphs, got %lu\n", (unsigned long)parsed9.count); }
+        else {
+            NSString *expected9 = @"\nline after blank";
+            if (![parsed9[1][@"text"] isEqualToString:expected9]) { ok = NO; fprintf(stderr, "    FAIL: leading blank: text is '%s', expected '%s'\n", [parsed9[1][@"text"] UTF8String], [expected9 UTF8String]); }
+        }
+
+        // Test 10: Code containing triple backtick-like lines (should not close fence)
+        NSString *md10 = @"# Title\n````\nSome ```code``` here\n````";
+        NSArray *parsed10 = markdownToParaModel(md10);
+        if (parsed10.count != 2) { ok = NO; fprintf(stderr, "    FAIL: backtick content: expected 2 paragraphs, got %lu\n", (unsigned long)parsed10.count); }
+        else {
+            if (![parsed10[1][@"text"] isEqualToString:@"Some ```code``` here"]) { ok = NO; fprintf(stderr, "    FAIL: backtick content: text is '%s'\n", [parsed10[1][@"text"] UTF8String]); }
+        }
+
+        // Test 11: Tilde fence
+        NSString *md11 = @"# Title\n~~~\ncode in tildes\n~~~";
+        NSArray *parsed11 = markdownToParaModel(md11);
+        if (parsed11.count != 2) { ok = NO; fprintf(stderr, "    FAIL: tilde fence: expected 2 paragraphs, got %lu\n", (unsigned long)parsed11.count); }
+        else {
+            if ([parsed11[1][@"style"] integerValue] != 4) { ok = NO; fprintf(stderr, "    FAIL: tilde fence: style is %ld\n", (long)[parsed11[1][@"style"] integerValue]); }
+            if (![parsed11[1][@"text"] isEqualToString:@"code in tildes"]) { ok = NO; fprintf(stderr, "    FAIL: tilde fence: text is '%s'\n", [parsed11[1][@"text"] UTF8String]); }
+        }
+
+        // Test 12: Closing fence must match opening char (backtick opened, tilde doesn't close)
+        NSString *md12 = @"# Title\n```\nline1\n~~~\nline2\n```";
+        NSArray *parsed12 = markdownToParaModel(md12);
+        if (parsed12.count != 2) { ok = NO; fprintf(stderr, "    FAIL: fence char mismatch: expected 2 paragraphs, got %lu\n", (unsigned long)parsed12.count); }
+        else {
+            NSString *expected12 = @"line1\n~~~\nline2";
+            if (![parsed12[1][@"text"] isEqualToString:expected12]) { ok = NO; fprintf(stderr, "    FAIL: fence char mismatch: text is '%s'\n", [parsed12[1][@"text"] UTF8String]); }
+        }
+
+        if (ok) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL\n"); failed++; }
+    }
+
+    // Test: write-markdown code block (end-to-end)
+    fprintf(stderr, "Test: write-markdown code block...\n");
+    {
+        // Create a note and write markdown with a code block
+        id cbNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        NSString *cbTitle = @"__code_block_test__";
+        id cbDoc = ((id (*)(id, SEL))objc_msgSend)(cbNote, sel_registerName("document"));
+        id cbMs = ((id (*)(id, SEL))objc_msgSend)(cbDoc, sel_registerName("mergeableString"));
+        ((void (*)(id, SEL))objc_msgSend)(cbNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(cbMs, sel_registerName("insertString:atIndex:"), cbTitle, 0);
+        id cbS0 = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(cbS0, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(cbMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": cbS0}, NSMakeRange(0, cbTitle.length));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            cbNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, cbTitle.length), cbTitle.length);
+        ((void (*)(id, SEL))objc_msgSend)(cbNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(cbNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        // Write markdown with code block
+        NSString *cbMarkdown = @"# __code_block_test__\n```\necho hello world\n```\nBody after code";
+        cmdWriteMarkdownWithString(cbNote, viewContext, cbMarkdown, NO, NO);
+
+        // Re-read the note and check the style
+        cbNote = findNoteByID(viewContext, noteToDict(cbNote)[@"id"]);
+        NSArray *cbModel = noteToParaModel(cbNote);
+        BOOL cbOk = NO;
+        for (NSDictionary *p in cbModel) {
+            if ([p[@"style"] integerValue] == 4 && [p[@"text"] isEqualToString:@"echo hello world"]) {
+                cbOk = YES;
+                break;
+            }
+        }
+
+        if (cbOk) { fprintf(stderr, "  PASS\n"); passed++; }
+        else {
+            fprintf(stderr, "  FAIL (style 4 paragraph not found)\n");
+            for (NSDictionary *p in cbModel) {
+                fprintf(stderr, "    style=%ld text='%s'\n", (long)[p[@"style"] integerValue], [p[@"text"] UTF8String]);
+            }
+            failed++;
+        }
+
+        deleteNote(cbNote, viewContext);
+        [viewContext save:nil];
+    }
+
     // Test: write-markdown no-change round-trip (subprocess)
     fprintf(stderr, "Test: write-markdown no-change round-trip...\n");
     {
@@ -5953,7 +6226,7 @@ static void usage(void) {
     fprintf(stderr, "notekit — read and edit Apple Notes via the NotesShared framework\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Data model: A note is a flat string with attribute ranges at character offsets.\n");
-    fprintf(stderr, "Each range has a style (0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist), indent level,\n");
+    fprintf(stderr, "Each range has a style (0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist), indent level,\n");
     fprintf(stderr, "and optional properties (todo-done, link, strikethrough). Use read-attrs to see\n");
     fprintf(stderr, "the raw attribute stream. All editing operates on character offsets.\n");
     fprintf(stderr, "\n");
@@ -6186,10 +6459,10 @@ int main(int argc, const char *argv[]) {
             NSInteger styleVal = -1;
             if (opts[@"style"]) {
                 if (!isStrictInteger(opts[@"style"], &styleVal)) {
-                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
                 }
                 if (!isValidStyle(styleVal)) {
-                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
                 }
             }
             return cmdAppend(viewContext, noteID, kwText, styleVal);
@@ -6202,10 +6475,10 @@ int main(int argc, const char *argv[]) {
             NSInteger styleVal = -1;
             if (opts[@"style"]) {
                 if (!isStrictInteger(opts[@"style"], &styleVal)) {
-                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
                 }
                 if (!isValidStyle(styleVal)) {
-                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
                 }
             }
             return cmdInsert(viewContext, noteID, kwText, [opts[@"position"] integerValue],

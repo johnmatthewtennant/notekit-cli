@@ -79,13 +79,6 @@ static void printJSON(id obj) {
     printf("%s\n", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String);
 }
 
-static void triggerNotesRefresh(void) {
-    // Only activate Notes.app if it's already running to force UI refresh
-    NSAppleScript *script = [[NSAppleScript alloc] initWithSource:
-        @"if application \"Notes\" is running then tell application \"Notes\" to activate"];
-    [script executeAndReturnError:nil];
-}
-
 // --- Fetch Helpers ---
 
 static NSArray *fetchFolders(id viewContext) {
@@ -414,7 +407,6 @@ static int cmdCreateFolder(id viewContext, NSString *name) {
     NSError *error = nil;
     [viewContext save:&error];
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
-    triggerNotesRefresh();
 
     printJSON(@{@"name": name, @"created": @YES});
     return 0;
@@ -435,7 +427,6 @@ static int cmdDeleteFolder(id viewContext, NSString *name) {
     NSError *error = nil;
     [viewContext save:&error];
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
-    triggerNotesRefresh();
 
     printJSON(@{@"name": name, @"deleted": @YES});
     return 0;
@@ -526,7 +517,6 @@ static int cmdDuplicate(id viewContext, NSString *identifier, NSString *newTitle
     NSError *error = nil;
     [viewContext save:&error];
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
-    triggerNotesRefresh();
 
     printJSON(noteToDict(newNote));
     return 0;
@@ -712,7 +702,6 @@ static int cmdSetAttr(id viewContext, NSString *identifier,
     NSError *error = nil;
     [viewContext save:&error];
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
-    triggerNotesRefresh();
 
     printJSON(@{@"id": identifier, @"offset": @(offset), @"length": @(length), @"updated": @YES});
     return 0;
@@ -734,7 +723,6 @@ static int cmdMoveNote(id viewContext, NSString *identifier, NSString *toFolder)
     NSError *error = nil;
     [viewContext save:&error];
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
-    triggerNotesRefresh();
 
     printJSON(@{@"id": identifier, @"movedTo": toFolder});
     return 0;
@@ -769,7 +757,6 @@ static int cmdPin(id viewContext, NSString *identifier, BOOL pin) {
     NSError *error = nil;
     [viewContext save:&error];
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
-    triggerNotesRefresh();
 
     printJSON(@{@"id": identifier, @"pinned": @(pin)});
     return 0;
@@ -1074,7 +1061,6 @@ static int cmdCreateEmpty(id viewContext, NSString *folderName) {
     NSError *error = nil;
     [viewContext save:&error];
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
-    triggerNotesRefresh();
 
     printJSON(noteToDict(note));
     return 0;
@@ -1090,7 +1076,6 @@ static int cmdDelete(id viewContext, NSString *identifier) {
     NSError *error = nil;
     [viewContext save:&error];
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
-    triggerNotesRefresh();
 
     printJSON(@{@"id": identifier, @"deleted": @YES});
     return 0;
@@ -1106,7 +1091,6 @@ static void saveNote(id note, id viewContext, NSUInteger newLength, NSInteger de
     NSError *error = nil;
     [viewContext save:&error];
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
-    triggerNotesRefresh();
 }
 
 static int cmdAppend(id viewContext, NSString *identifier, NSString *text, NSInteger styleValue) {
@@ -2583,7 +2567,6 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
     if (error) {
         errorExit([NSString stringWithFormat:@"Save error: %@", error]);
     }
-    triggerNotesRefresh();
 
     printJSON(summary);
     return 0;

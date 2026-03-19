@@ -10,7 +10,7 @@ notes-inspect: notes-inspect.m
 	$(CC) $(CFLAGS) $< -o $@
 
 generate: generate-notes-cli.py
-	python3 generate-notes-cli.py > notekit.m.tmp && mv notekit.m.tmp notekit.m
+	python3 generate-notes-cli.py > notekit.m
 	$(MAKE) notekit
 
 install-hooks:

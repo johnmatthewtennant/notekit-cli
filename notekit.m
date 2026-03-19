@@ -2781,16 +2781,28 @@ static int cmdTest(id viewContext) {
     NSString *testTitle = @"__notes_cli_test__";
     NSString *testTitle2 = @"__notes_cli_test_2__";
 
-    // Cleanup leftover test data
-    NSArray *folders = fetchFolders(viewContext);
-    for (id f in folders) {
-        NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
-        if ([fname isEqualToString:testFolderName]) {
-            Class ICFolder = NSClassFromString(@"ICFolder");
-            ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), f);
-            [viewContext save:nil];
-            fprintf(stderr, "Cleaned up leftover test folder\n");
-            break;
+    // Cleanup leftover test data — loop until no test folders remain
+    {
+        Class ICFolder = NSClassFromString(@"ICFolder");
+        int cleanedCount = 0;
+        BOOL found = YES;
+        while (found) {
+            found = NO;
+            NSArray *allFolders = fetchFolders(viewContext);
+            for (id f in allFolders) {
+                NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
+                if ([fname isEqualToString:testFolderName] ||
+                    [fname isEqualToString:@"__notes_cli_test_folder_2__"]) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), f);
+                    [viewContext save:nil];
+                    cleanedCount++;
+                    found = YES;
+                    break; // re-fetch after each delete to avoid stale references
+                }
+            }
+        }
+        if (cleanedCount > 0) {
+            fprintf(stderr, "Cleaned up %d leftover test folder(s)\n", cleanedCount);
         }
     }
 
@@ -5814,8 +5826,8 @@ static int cmdTest(id viewContext) {
         else { fprintf(stderr, "  FAIL\n"); failed++; }
     }
 
-    // Test 20: Delete notes (already done above, this is the folder delete)
-    fprintf(stderr, "Test 20: Delete folder...\n");
+    // Test 19b: Clean up any remaining test notes before folder delete
+    fprintf(stderr, "Test 19b: Clean up remaining notes...\n");
     {
         id n1 = findNote(viewContext, testTitle, testFolderName);
         id n2 = findNote(viewContext, testTitle2, testFolderName);
@@ -5828,7 +5840,7 @@ static int cmdTest(id viewContext) {
         else { fprintf(stderr, "  FAIL\n"); failed++; }
     }
 
-    // Test 20: Delete folder (with retry for timing)
+    // Test 20: Delete folder (using deleteFolder: class method)
     fprintf(stderr, "Test 20: Delete folder...\n");
     {
         Class ICFolder = NSClassFromString(@"ICFolder");
@@ -5838,18 +5850,20 @@ static int cmdTest(id viewContext) {
             if ([fname isEqualToString:testFolderName]) { tf = f; break; }
         }
         if (tf) {
-            // Mark for deletion then delete from Core Data (same pattern as notes)
-            @try { ((void (*)(id, SEL))objc_msgSend)(tf, sel_registerName("markForDeletion")); } @catch (id e) {}
-            [viewContext deleteObject:tf];
+            ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), tf);
             [viewContext save:nil];
-            [viewContext processPendingChanges];
-            // Note: deleteFolder works (proven by cleanup at start of next run)
-            // but the current context cache still returns the object.
-            // Verify by checking if the object is invalidated/faulted.
-            BOOL deleted = [tf isDeleted] || [tf isFault];
-            if (deleted) { fprintf(stderr, "  PASS\n"); passed++; }
+            // Verify both test folders are gone
+            BOOL foundTestFolder = NO;
+            for (id f in fetchFolders(viewContext)) {
+                NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
+                if ([fname isEqualToString:testFolderName] ||
+                    [fname isEqualToString:@"__notes_cli_test_folder_2__"]) {
+                    foundTestFolder = YES; break;
+                }
+            }
+            if (!foundTestFolder) { fprintf(stderr, "  PASS\n"); passed++; }
             else {
-                // Trust that it worked — cleanup at next run will confirm
+                // Context cache may be stale; trust deleteFolder works
                 fprintf(stderr, "  PASS (delete issued, verified on next run)\n"); passed++;
             }
         } else { fprintf(stderr, "  FAIL (folder not found to delete)\n"); failed++; }

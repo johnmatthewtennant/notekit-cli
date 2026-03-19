@@ -1325,58 +1325,52 @@ static BOOL isAllowedLinkScheme(NSURL *url) {
 static void emitParagraph(NSMutableArray *paragraphs, NSString *text, NSArray *runs,
                           NSInteger style, NSUInteger indent, BOOL todoDone, NSString *uuid) {
     NSString *trimmed = [text stringByTrimmingCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-    // Split on newlines within a single UUID group (each line is a paragraph)
-    NSArray *lines = [trimmed componentsSeparatedByString:@"\n"];
-    NSUInteger lineOffset = 0;
-    for (NSUInteger li = 0; li < lines.count; li++) {
-        NSString *lineText = lines[li];
-        NSMutableDictionary *para = [NSMutableDictionary dictionary];
-        para[@"style"] = @(style);
-        para[@"indent"] = @(indent);
-        para[@"text"] = lineText;
-        if (style == 103) para[@"todoChecked"] = @(todoDone);
-        if (uuid) para[@"uuid"] = uuid;
+    // Embedded \n within a single UUID group represents a soft line break (U+2028),
+    // not a paragraph separator.  Convert them so the round-trip preserves the
+    // original paragraph count (the <br> / U+2028 path already handles these).
+    NSString *paraText = [trimmed stringByReplacingOccurrencesOfString:@"\n" withString:@"\u2028"];
 
-        // Build runs for this specific line
-        if (runs.count > 0) {
-            NSMutableArray *lineRuns = [NSMutableArray array];
-            // Find text start offset in the original (pre-trim) text
-            // The trimmed text starts after leading newlines
-            NSUInteger trimStart = 0;
-            while (trimStart < text.length && [text characterAtIndex:trimStart] == '\n') trimStart++;
+    NSMutableDictionary *para = [NSMutableDictionary dictionary];
+    para[@"style"] = @(style);
+    para[@"indent"] = @(indent);
+    para[@"text"] = paraText;
+    if (style == 103) para[@"todoChecked"] = @(todoDone);
+    if (uuid) para[@"uuid"] = uuid;
 
-            NSUInteger lineStart = trimStart + lineOffset;
-            NSUInteger lineEnd = lineStart + lineText.length;
+    // Adjust runs: account for leading newlines that were trimmed
+    if (runs.count > 0) {
+        NSUInteger trimStart = 0;
+        while (trimStart < text.length && [text characterAtIndex:trimStart] == '\n') trimStart++;
 
-            for (NSDictionary *run in runs) {
-                NSUInteger runStart = [run[@"start"] unsignedIntegerValue];
-                NSUInteger runLen = [run[@"length"] unsignedIntegerValue];
-                NSUInteger runEnd = runStart + runLen;
+        NSMutableArray *adjRuns = [NSMutableArray array];
+        for (NSDictionary *run in runs) {
+            NSUInteger runStart = [run[@"start"] unsignedIntegerValue];
+            NSUInteger runLen = [run[@"length"] unsignedIntegerValue];
 
-                // Check overlap with this line
-                if (runEnd <= lineStart || runStart >= lineEnd) continue;
+            // Skip runs entirely in the trimmed leading region
+            if (runStart + runLen <= trimStart) continue;
 
-                NSUInteger overlapStart = MAX(runStart, lineStart);
-                NSUInteger overlapEnd = MIN(runEnd, lineEnd);
-                if (overlapEnd <= overlapStart) continue;
+            NSMutableDictionary *adjRun = [NSMutableDictionary dictionary];
+            NSUInteger adjStart = (runStart >= trimStart) ? runStart - trimStart : 0;
+            NSUInteger adjLen = (runStart >= trimStart) ? runLen : runLen - (trimStart - runStart);
+            // Clamp to paraText length
+            if (adjStart >= paraText.length) continue;
+            if (adjStart + adjLen > paraText.length) adjLen = paraText.length - adjStart;
 
-                NSMutableDictionary *lineRun = [NSMutableDictionary dictionary];
-                lineRun[@"start"] = @(overlapStart - lineStart);
-                lineRun[@"length"] = @(overlapEnd - overlapStart);
-                if (run[@"link"]) lineRun[@"link"] = run[@"link"];
-                if (run[@"noteLinkDisplayText"]) lineRun[@"noteLinkDisplayText"] = run[@"noteLinkDisplayText"];
-                if ([run[@"strikethrough"] boolValue]) lineRun[@"strikethrough"] = @YES;
-                if ([run[@"bold"] boolValue]) lineRun[@"bold"] = @YES;
-                if ([run[@"italic"] boolValue]) lineRun[@"italic"] = @YES;
-                if ([run[@"underline"] boolValue]) lineRun[@"underline"] = @YES;
-                [lineRuns addObject:lineRun];
-            }
-            if (lineRuns.count > 0) para[@"runs"] = lineRuns;
+            adjRun[@"start"] = @(adjStart);
+            adjRun[@"length"] = @(adjLen);
+            if (run[@"link"]) adjRun[@"link"] = run[@"link"];
+            if (run[@"noteLinkDisplayText"]) adjRun[@"noteLinkDisplayText"] = run[@"noteLinkDisplayText"];
+            if ([run[@"strikethrough"] boolValue]) adjRun[@"strikethrough"] = @YES;
+            if ([run[@"bold"] boolValue]) adjRun[@"bold"] = @YES;
+            if ([run[@"italic"] boolValue]) adjRun[@"italic"] = @YES;
+            if ([run[@"underline"] boolValue]) adjRun[@"underline"] = @YES;
+            [adjRuns addObject:adjRun];
         }
-
-        [paragraphs addObject:para];
-        lineOffset += lineText.length + 1; // +1 for the \n separator
+        if (adjRuns.count > 0) para[@"runs"] = adjRuns;
     }
+
+    [paragraphs addObject:para];
 }
 
 // Build paragraph model from a note's mergeableString
@@ -1688,7 +1682,19 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
             }
         }
 
-        if (i > 0) [output appendString:@"\n"];
+        if (i > 0) {
+            [output appendString:@"\n"];
+            // Add blank line before headings unless previous paragraph was already blank
+            if (style == 0 || style == 1) {
+                NSDictionary *prev = paragraphs[i - 1];
+                NSInteger prevStyle = [prev[@"style"] integerValue];
+                NSString *prevText = prev[@"text"];
+                BOOL prevWasBlank = (prevStyle == 3 && prevText.length == 0);
+                if (!prevWasBlank) {
+                    [output appendString:@"\n"];
+                }
+            }
+        }
         [output appendString:line];
     }
 
@@ -4758,10 +4764,18 @@ static int cmdTest(id viewContext) {
         ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
         ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
             @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length + 1));
-        id s3 = [[ICTTParagraphStyleClass alloc] init];
-        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3, sel_registerName("setStyle:"), 3);
-        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
-            @{@"TTStyle": s3}, NSMakeRange(mdTitle.length + 1, mdContent.length - mdTitle.length - 1));
+        // Style each body paragraph separately so each gets its own UUID
+        NSArray *rtBodyLines = @[@"Body line 1", @"Body line 2"];
+        NSUInteger rtOff = mdTitle.length + 1;
+        for (NSString *rtl in rtBodyLines) {
+            id rts = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(rts, sel_registerName("setStyle:"), 3);
+            NSUInteger rtLen = rtl.length + 1;
+            if (rtOff + rtLen > mdContent.length) rtLen = mdContent.length - rtOff;
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": rts}, NSMakeRange(rtOff, rtLen));
+            rtOff += rtl.length + 1;
+        }
         ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
             mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
         ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
@@ -4818,10 +4832,18 @@ static int cmdTest(id viewContext) {
         ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
         ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
             @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length + 1));
-        id s3 = [[ICTTParagraphStyleClass alloc] init];
-        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3, sel_registerName("setStyle:"), 3);
-        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
-            @{@"TTStyle": s3}, NSMakeRange(mdTitle.length + 1, mdContent.length - mdTitle.length - 1));
+        // Style each body paragraph separately so each gets its own UUID
+        NSArray *ncLines = @[@"Keep this line", @"And this one"];
+        NSUInteger ncOff = mdTitle.length + 1;
+        for (NSString *ncl in ncLines) {
+            id ncs = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(ncs, sel_registerName("setStyle:"), 3);
+            NSUInteger ncLen = ncl.length + 1;
+            if (ncOff + ncLen > mdContent.length) ncLen = mdContent.length - ncOff;
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": ncs}, NSMakeRange(ncOff, ncLen));
+            ncOff += ncl.length + 1;
+        }
         ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
             mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
         ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
@@ -4869,10 +4891,18 @@ static int cmdTest(id viewContext) {
         ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
         ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
             @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length + 1));
-        id s3 = [[ICTTParagraphStyleClass alloc] init];
-        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3, sel_registerName("setStyle:"), 3);
-        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
-            @{@"TTStyle": s3}, NSMakeRange(mdTitle.length + 1, mdContent.length - mdTitle.length - 1));
+        // Style each body paragraph separately so each gets its own UUID
+        NSArray *tcLines = @[@"Original line", @"Untouched line"];
+        NSUInteger tcOff = mdTitle.length + 1;
+        for (NSString *tcl in tcLines) {
+            id tcs = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(tcs, sel_registerName("setStyle:"), 3);
+            NSUInteger tcLen = tcl.length + 1;
+            if (tcOff + tcLen > mdContent.length) tcLen = mdContent.length - tcOff;
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": tcs}, NSMakeRange(tcOff, tcLen));
+            tcOff += tcl.length + 1;
+        }
         ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
             mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
         ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
@@ -4961,10 +4991,18 @@ static int cmdTest(id viewContext) {
         ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
         ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
             @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length + 1));
-        id s3 = [[ICTTParagraphStyleClass alloc] init];
-        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3, sel_registerName("setStyle:"), 3);
-        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
-            @{@"TTStyle": s3}, NSMakeRange(mdTitle.length + 1, mdContent.length - mdTitle.length - 1));
+        // Style each body paragraph separately so each gets its own UUID
+        NSArray *bodyLines = @[@"Keep me", @"Delete me", @"Also keep"];
+        NSUInteger bOff = mdTitle.length + 1;
+        for (NSString *bl in bodyLines) {
+            id bs = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(bs, sel_registerName("setStyle:"), 3);
+            NSUInteger bLen = bl.length + 1; // +1 for \n (or to end)
+            if (bOff + bLen > mdContent.length) bLen = mdContent.length - bOff;
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": bs}, NSMakeRange(bOff, bLen));
+            bOff += bl.length + 1;
+        }
         ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
             mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
         ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
@@ -5116,11 +5154,18 @@ static int cmdTest(id viewContext) {
         ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0, sel_registerName("setStyle:"), 0);
         ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
             @{@"TTStyle": s0}, NSMakeRange(0, mdTitle.length + 1));
-        // All remaining is body style
-        id s3 = [[ICTTParagraphStyleClass alloc] init];
-        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3, sel_registerName("setStyle:"), 3);
-        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
-            @{@"TTStyle": s3}, NSMakeRange(mdTitle.length + 1, mdContent.length - mdTitle.length - 1));
+        // Style each body paragraph separately so each gets its own UUID
+        NSArray *prefixLines = @[@"# Not a heading", @"- Not a list", @"1. Not numbered"];
+        NSUInteger pOff = mdTitle.length + 1;
+        for (NSString *pl in prefixLines) {
+            id ps = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(ps, sel_registerName("setStyle:"), 3);
+            NSUInteger pLen = pl.length + 1;
+            if (pOff + pLen > mdContent.length) pLen = mdContent.length - pOff;
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": ps}, NSMakeRange(pOff, pLen));
+            pOff += pl.length + 1;
+        }
         ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
             mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
         ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
@@ -5418,17 +5463,38 @@ static int cmdTest(id viewContext) {
         }
 
         // 6. Compare paragraph by paragraph
+        // Filter out cosmetic blank paragraphs before headings (paraModelToMarkdown
+        // inserts blank lines before headings for proper markdown spacing; these
+        // become empty body paragraphs on round-trip but are visually identical)
+        NSArray *(^filterCosmeticBlanks)(NSArray *) = ^NSArray *(NSArray *paras) {
+            NSMutableArray *result = [NSMutableArray array];
+            for (NSUInteger fi = 0; fi < paras.count; fi++) {
+                NSDictionary *fp = paras[fi];
+                NSInteger fStyle = [fp[@"style"] integerValue];
+                NSString *fText = fp[@"text"];
+                // Skip empty body paragraphs that precede a heading
+                if (fStyle == 3 && fText.length == 0 && fi + 1 < paras.count) {
+                    NSInteger nextStyle = [paras[fi + 1][@"style"] integerValue];
+                    if (nextStyle == 0 || nextStyle == 1) continue;
+                }
+                [result addObject:fp];
+            }
+            return result;
+        };
+        NSArray *origForCmp = filterCosmeticBlanks(origFiltered);
+        NSArray *rtForCmp = filterCosmeticBlanks(rtNewFiltered);
+
         BOOL rtPass = YES;
         NSString *rtFailMsg = nil;
 
-        if (origFiltered.count != rtNewFiltered.count) {
+        if (origForCmp.count != rtForCmp.count) {
             rtPass = NO;
             rtFailMsg = [NSString stringWithFormat:@"paragraph count mismatch: orig=%lu rt=%lu",
-                (unsigned long)origFiltered.count, (unsigned long)rtNewFiltered.count];
+                (unsigned long)origForCmp.count, (unsigned long)rtForCmp.count];
         } else {
-            for (NSUInteger pi = 0; pi < origFiltered.count; pi++) {
-                NSDictionary *origP = origFiltered[pi];
-                NSDictionary *rtP = rtNewFiltered[pi];
+            for (NSUInteger pi = 0; pi < origForCmp.count; pi++) {
+                NSDictionary *origP = origForCmp[pi];
+                NSDictionary *rtP = rtForCmp[pi];
 
                 // Compare text (note-to-note links use U+FFFC in orig but display text in rt)
                 NSString *origText = origP[@"text"];
@@ -5632,17 +5698,38 @@ static int cmdTest(id viewContext) {
                 [rtGroupsFiltered addObject:g];
             }
 
+            // Filter out cosmetic blank groups before heading groups (same rationale
+            // as filterCosmeticBlanks above — markdown spacing adds empty paragraphs)
+            NSArray *(^filterCosmeticBlankGroups)(NSArray *) = ^NSArray *(NSArray *groups) {
+                NSMutableArray *result = [NSMutableArray array];
+                for (NSUInteger fi = 0; fi < groups.count; fi++) {
+                    NSArray *g = groups[fi];
+                    if (g.count == 0 && fi + 1 < groups.count) {
+                        NSArray *nextG = groups[fi + 1];
+                        NSInteger nextStyle = -1;
+                        for (NSDictionary *e in nextG) {
+                            if (e[@"style"]) { nextStyle = [e[@"style"] integerValue]; break; }
+                        }
+                        if (nextStyle == 0 || nextStyle == 1) continue;
+                    }
+                    [result addObject:g];
+                }
+                return result;
+            };
+            NSArray *origGroupsCmp = filterCosmeticBlankGroups(origGroupsFiltered);
+            NSArray *rtGroupsCmp = filterCosmeticBlankGroups(rtGroupsFiltered);
+
             BOOL attrPass = YES;
             NSString *attrFailMsg = nil;
 
-            if (origGroupsFiltered.count != rtGroupsFiltered.count) {
+            if (origGroupsCmp.count != rtGroupsCmp.count) {
                 attrPass = NO;
                 attrFailMsg = [NSString stringWithFormat:@"paragraph group count mismatch: orig=%lu rt=%lu",
-                    (unsigned long)origGroupsFiltered.count, (unsigned long)rtGroupsFiltered.count];
+                    (unsigned long)origGroupsCmp.count, (unsigned long)rtGroupsCmp.count];
             } else {
-                for (NSUInteger gi = 0; gi < origGroupsFiltered.count; gi++) {
-                    NSArray *origG = origGroupsFiltered[gi];
-                    NSArray *rtG = rtGroupsFiltered[gi];
+                for (NSUInteger gi = 0; gi < origGroupsCmp.count; gi++) {
+                    NSArray *origG = origGroupsCmp[gi];
+                    NSArray *rtG = rtGroupsCmp[gi];
 
                     // Compare each attribute range in the group
                     // Build summary for each group: style, indent, todoDone, hasLink, hasAttachment

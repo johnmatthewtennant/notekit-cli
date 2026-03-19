@@ -2962,6 +2962,69 @@ static void deleteNote(id note, id viewContext) {
     [viewContext deleteObject:note];
 }
 
+
+// --- Test Helpers ---
+
+// Run a subprocess command and parse JSON output
+static id runCommandAndParseJSON(const char *exePath, NSString *args) {
+    NSString *cmd = [NSString stringWithFormat:@"'%s' %@ 2>/dev/null", exePath, args];
+    FILE *fp = popen([cmd UTF8String], "r");
+    NSMutableData *outData = [NSMutableData data];
+    if (fp) {
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) [outData appendBytes:buf length:n];
+        pclose(fp);
+    }
+    if (outData.length == 0) return nil;
+    return [NSJSONSerialization JSONObjectWithData:outData options:0 error:nil];
+}
+
+// Validate that a note dict has all required keys with correct types
+// Returns nil on success, or error description on failure
+static NSString *validateNoteDict(NSDictionary *dict) {
+    if (![dict isKindOfClass:[NSDictionary class]]) return @"not a dictionary";
+    // Required keys (always present)
+    NSDictionary *requiredTypes = @{
+        @"title": [NSString class],
+        @"body": [NSString class],
+        @"folder": [NSString class],
+        @"id": [NSString class],
+        @"createdAt": [NSString class],
+        @"modifiedAt": [NSString class],
+        @"hasChecklist": [NSNumber class],
+        @"isPinned": [NSNumber class],
+        @"hasTags": [NSNumber class],
+        @"snippet": [NSString class],
+    };
+    for (NSString *key in requiredTypes) {
+        id val = dict[key];
+        if (!val) return [NSString stringWithFormat:@"missing required key '%@'", key];
+        if (![val isKindOfClass:requiredTypes[key]])
+            return [NSString stringWithFormat:@"key '%@' has wrong type", key];
+    }
+    // Optional keys (type-checked if present)
+    id url = dict[@"url"];
+    if (url && ![url isKindOfClass:[NSString class]]) return @"key 'url' has wrong type";
+    return nil;
+}
+
+// Validate all note dicts in an array. Returns nil on success, error on first failure.
+static NSString *validateNoteDictArray(NSArray *arr) {
+    if (![arr isKindOfClass:[NSArray class]] || arr.count == 0) return @"not a non-empty JSON array";
+    for (NSUInteger i = 0; i < arr.count; i++) {
+        NSString *err = validateNoteDict(arr[i]);
+        if (err) return [NSString stringWithFormat:@"element %lu: %@", (unsigned long)i, err];
+    }
+    return nil;
+}
+
+// Check subprocess exit safely (handles system() failures)
+static BOOL subprocessFailedProperly(int sysRet) {
+    if (sysRet == -1) return NO; // system() itself failed
+    return WIFEXITED(sysRet) && WEXITSTATUS(sysRet) != 0;
+}
+
 static int cmdTest(id viewContext) {
     int passed = 0, failed = 0;
     NSString *testFolderName = @"__notes_cli_test_folder__";
@@ -3335,20 +3398,14 @@ static int cmdTest(id viewContext) {
     fprintf(stderr, "Test 13: cmdSearch...\n");
     { int r = cmdSearch(viewContext, testTitle, testFolderName); if (r==0) { fprintf(stderr, "  PASS\n"); passed++; } else { fprintf(stderr, "  FAIL\n"); failed++; } }
 
-    // Test 14: Verify JSON shape from noteToDict
-    fprintf(stderr, "Test 14: JSON shape...\n");
+    // Test 14: Verify JSON shape from noteToDict (all fields + types)
+    fprintf(stderr, "Test 14: JSON shape (all noteToDict fields)...\n");
     {
         id note = findNote(viewContext, testTitle, testFolderName);
         NSDictionary *dict = noteToDict(note);
-        BOOL hasTitle = dict[@"title"] != nil;
-        BOOL hasFolder = dict[@"folder"] != nil;
-        BOOL hasId = dict[@"id"] != nil;
-        BOOL hasCreated = dict[@"createdAt"] != nil;
-        BOOL hasModified = dict[@"modifiedAt"] != nil;
-        BOOL hasChecklist = dict[@"hasChecklist"] != nil;
-        if (hasTitle && hasFolder && hasId && hasCreated && hasModified && hasChecklist) {
-            fprintf(stderr, "  PASS\n"); passed++;
-        } else { fprintf(stderr, "  FAIL\n"); failed++; }
+        NSString *err = validateNoteDict(dict);
+        if (!err) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (%s)\n", [err UTF8String]); failed++; }
     }
 
     // Test 16: cmdReadAttrs (call actual command)
@@ -3367,7 +3424,7 @@ static int cmdTest(id viewContext) {
         else { fprintf(stderr, "  FAIL\n"); failed++; }
     }
 
-    // --- Error Path Tests (subprocess) ---
+    // --- JSON Output Shape + Error Path Tests (subprocess) ---
 
     char rawExePath[PATH_MAX];
     char exePath[PATH_MAX];
@@ -3720,6 +3777,173 @@ static int cmdTest(id viewContext) {
         int ret = system([cmd UTF8String]);
         if (WIFEXITED(ret) && WEXITSTATUS(ret) == 1) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (expected exit 1, got status %d)\n", ret); failed++; }
+    }
+
+    // --- Note Linking Tests ---
+
+    // Test: cmdList JSON output shape (subprocess, all elements validated)
+    fprintf(stderr, "Test: cmdList JSON shape...\n");
+    {
+        NSString *args = [NSString stringWithFormat:@"list --folder '%@'", testFolderName];
+        id parsed = runCommandAndParseJSON(exePath, args);
+        NSString *err = validateNoteDictArray(parsed);
+        if (!err) { fprintf(stderr, "  PASS (%lu notes)\n", (unsigned long)[parsed count]); passed++; }
+        else { fprintf(stderr, "  FAIL (%s)\n", [err UTF8String]); failed++; }
+    }
+
+    // Test: cmdFolders JSON output shape (subprocess)
+    fprintf(stderr, "Test: cmdFolders JSON shape...\n");
+    {
+        id parsed = runCommandAndParseJSON(exePath, @"folders");
+        if (parsed && [parsed isKindOfClass:[NSArray class]] && [parsed count] > 0) {
+            BOOL allValid = YES;
+            BOOL foundTestFolder = NO;
+            NSUInteger badIdx = 0;
+            for (NSUInteger i = 0; i < [parsed count]; i++) {
+                NSDictionary *entry = parsed[i];
+                if (![entry[@"name"] isKindOfClass:[NSString class]]) { allValid = NO; badIdx = i; break; }
+                if ([entry[@"name"] isEqualToString:testFolderName]) foundTestFolder = YES;
+            }
+            if (allValid && foundTestFolder) { fprintf(stderr, "  PASS (%lu folders)\n", (unsigned long)[parsed count]); passed++; }
+            else if (!allValid) { fprintf(stderr, "  FAIL (element %lu missing 'name')\n", (unsigned long)badIdx); failed++; }
+            else { fprintf(stderr, "  FAIL (test folder not found)\n"); failed++; }
+        } else { fprintf(stderr, "  FAIL (not a JSON array or empty)\n"); failed++; }
+    }
+
+    // Test: cmdGet JSON output shape (subprocess)
+    fprintf(stderr, "Test: cmdGet JSON shape...\n");
+    {
+        id noteForGet = findNote(viewContext, testTitle, testFolderName);
+        NSString *getID = noteToDict(noteForGet)[@"id"];
+        NSString *args = [NSString stringWithFormat:@"get --id '%@'", getID];
+        id parsed = runCommandAndParseJSON(exePath, args);
+        NSString *err = validateNoteDict(parsed);
+        if (!err) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (%s)\n", [err UTF8String]); failed++; }
+    }
+
+    // Test: cmdSearch JSON output shape (subprocess, all elements validated)
+    fprintf(stderr, "Test: cmdSearch JSON shape...\n");
+    {
+        NSString *args = [NSString stringWithFormat:@"search --query '%@' --folder '%@'", testTitle, testFolderName];
+        id parsed = runCommandAndParseJSON(exePath, args);
+        NSString *err = validateNoteDictArray(parsed);
+        if (!err) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (%s)\n", [err UTF8String]); failed++; }
+    }
+
+    // Test: cmdReadStructured JSON shape (subprocess, predicate-based)
+    fprintf(stderr, "Test: cmdReadStructured JSON shape...\n");
+    {
+        id noteForRS = findNote(viewContext, testTitle, testFolderName);
+        NSString *rsID = noteToDict(noteForRS)[@"id"];
+        NSString *args = [NSString stringWithFormat:@"read-structured --id '%@'", rsID];
+        NSArray *arr = runCommandAndParseJSON(exePath, args);
+        if (arr && [arr isKindOfClass:[NSArray class]] && arr.count > 0) {
+            // Validate schema for every paragraph
+            BOOL schemaOk = YES;
+            NSUInteger badIdx = 0;
+            for (NSUInteger i = 0; i < arr.count; i++) {
+                NSDictionary *p = arr[i];
+                if (![p[@"text"] isKindOfClass:[NSString class]] ||
+                    ![p[@"style"] isKindOfClass:[NSNumber class]]) {
+                    schemaOk = NO; badIdx = i; break;
+                }
+            }
+            // Find at least one of each expected type by predicate
+            BOOL foundTitle = NO, foundBody = NO, foundChecklist = NO;
+            for (NSDictionary *p in arr) {
+                int style = [p[@"style"] intValue];
+                if (style == 0) foundTitle = YES;
+                if (style == 3) foundBody = YES;
+                if (style == 103) {
+                    if ([p[@"type"] isEqualToString:@"checklist"] && p[@"checked"] != nil)
+                        foundChecklist = YES;
+                }
+            }
+            if (schemaOk && foundTitle && foundBody && foundChecklist) {
+                fprintf(stderr, "  PASS (%lu paragraphs, all types found)\n", (unsigned long)arr.count); passed++;
+            } else if (!schemaOk) {
+                fprintf(stderr, "  FAIL (element %lu missing text/style)\n", (unsigned long)badIdx); failed++;
+            } else {
+                fprintf(stderr, "  FAIL (title=%d body=%d checklist=%d)\n", foundTitle, foundBody, foundChecklist); failed++;
+            }
+        } else { fprintf(stderr, "  FAIL (not a JSON array or empty)\n"); failed++; }
+    }
+
+    // Test: cmdReadAttrs JSON shape (subprocess, all elements validated)
+    fprintf(stderr, "Test: cmdReadAttrs JSON shape...\n");
+    {
+        id noteForRA = findNote(viewContext, testTitle, testFolderName);
+        NSString *raID = noteToDict(noteForRA)[@"id"];
+        NSString *args = [NSString stringWithFormat:@"read-attrs --id '%@'", raID];
+        NSArray *arr = runCommandAndParseJSON(exePath, args);
+        if (arr && [arr isKindOfClass:[NSArray class]] && arr.count > 0) {
+            BOOL allValid = YES;
+            NSUInteger badIdx = 0;
+            for (NSUInteger i = 0; i < arr.count; i++) {
+                NSDictionary *entry = arr[i];
+                if (![entry[@"text"] isKindOfClass:[NSString class]] ||
+                    ![entry[@"offset"] isKindOfClass:[NSNumber class]] ||
+                    ![entry[@"length"] isKindOfClass:[NSNumber class]] ||
+                    ![entry[@"style"] isKindOfClass:[NSNumber class]]) {
+                    allValid = NO; badIdx = i; break;
+                }
+            }
+            if (allValid) { fprintf(stderr, "  PASS (%lu ranges)\n", (unsigned long)arr.count); passed++; }
+            else { fprintf(stderr, "  FAIL (element %lu missing required fields)\n", (unsigned long)badIdx); failed++; }
+        } else { fprintf(stderr, "  FAIL (not a JSON array or empty)\n"); failed++; }
+    }
+
+    // --- Error Path Tests (subprocess) ---
+
+    // Test: Error - get non-existent note
+    fprintf(stderr, "Test: Error - get non-existent note...\n");
+    {
+        NSString *cmd = [NSString stringWithFormat:@"'%s' get --title '__nonexistent_note_999__' --folder '%@' 2>/dev/null", exePath, testFolderName];
+        int ret = system([cmd UTF8String]);
+        if (subprocessFailedProperly(ret)) { fprintf(stderr, "  PASS (exit code %d)\n", WEXITSTATUS(ret)); passed++; }
+        else { fprintf(stderr, "  FAIL (ret=%d, should have failed properly)\n", ret); failed++; }
+    }
+
+    // Test: Error - append to non-existent note
+    fprintf(stderr, "Test: Error - append to non-existent note...\n");
+    {
+        NSString *cmd = [NSString stringWithFormat:@"'%s' append --id 'NONEXISTENT_ID_999' --text 'hello' 2>/dev/null", exePath];
+        int ret = system([cmd UTF8String]);
+        if (subprocessFailedProperly(ret)) { fprintf(stderr, "  PASS (exit code %d)\n", WEXITSTATUS(ret)); passed++; }
+        else { fprintf(stderr, "  FAIL (ret=%d, should have failed properly)\n", ret); failed++; }
+    }
+
+    // Test: Error - replace non-existent text
+    fprintf(stderr, "Test: Error - replace non-existent text...\n");
+    {
+        id noteForErr = findNote(viewContext, testTitle, testFolderName);
+        NSString *errID = noteToDict(noteForErr)[@"id"];
+        NSString *cmd = [NSString stringWithFormat:@"'%s' replace --id '%@' --search '__text_that_does_not_exist__' --replacement 'new' 2>/dev/null", exePath, errID];
+        int ret = system([cmd UTF8String]);
+        if (subprocessFailedProperly(ret)) { fprintf(stderr, "  PASS (exit code %d)\n", WEXITSTATUS(ret)); passed++; }
+        else { fprintf(stderr, "  FAIL (ret=%d, should have failed properly)\n", ret); failed++; }
+    }
+
+    // Test: Error - delete-range with offset beyond note length
+    fprintf(stderr, "Test: Error - delete-range out of bounds...\n");
+    {
+        id noteForErr2 = findNote(viewContext, testTitle, testFolderName);
+        NSString *errID2 = noteToDict(noteForErr2)[@"id"];
+        NSString *cmd = [NSString stringWithFormat:@"'%s' delete-range --id '%@' --start 99999 --length 10 2>/dev/null", exePath, errID2];
+        int ret = system([cmd UTF8String]);
+        if (subprocessFailedProperly(ret)) { fprintf(stderr, "  PASS (exit code %d)\n", WEXITSTATUS(ret)); passed++; }
+        else { fprintf(stderr, "  FAIL (ret=%d, should have failed properly)\n", ret); failed++; }
+    }
+
+    // Test: Error - read non-existent note
+    fprintf(stderr, "Test: Error - read non-existent note...\n");
+    {
+        NSString *cmd = [NSString stringWithFormat:@"'%s' read --title '__nonexistent_note_999__' --folder '%@' 2>/dev/null", exePath, testFolderName];
+        int ret = system([cmd UTF8String]);
+        if (subprocessFailedProperly(ret)) { fprintf(stderr, "  PASS (exit code %d)\n", WEXITSTATUS(ret)); passed++; }
+        else { fprintf(stderr, "  FAIL (ret=%d, should have failed properly)\n", ret); failed++; }
     }
 
     // --- Note Linking Tests ---

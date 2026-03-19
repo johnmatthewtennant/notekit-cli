@@ -101,6 +101,7 @@ static void printJSON(id obj) {
 
 static NSArray *fetchFolders(id viewContext) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICFolder"];
+    request.predicate = [NSPredicate predicateWithFormat:@"markedForDeletion == NO AND folderType != 1"];
     NSError *error = nil;
     NSArray *folders = [viewContext executeFetchRequest:request error:&error];
     if (error) errorExit([NSString stringWithFormat:@"Failed to fetch folders: %@", error]);
@@ -110,12 +111,11 @@ static NSArray *fetchFolders(id viewContext) {
 static NSArray *fetchNotes(id viewContext, NSString *folderName, NSUInteger limit) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
     NSMutableArray *predicates = [NSMutableArray array];
+    [predicates addObject:[NSPredicate predicateWithFormat:@"markedForDeletion == NO"]];
     if (folderName) {
         [predicates addObject:[NSPredicate predicateWithFormat:@"folder.title == %@", folderName]];
     }
-    if (predicates.count > 0) {
-        request.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:predicates];
-    }
+    request.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:predicates];
     request.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"modificationDate" ascending:NO]];
     if (limit > 0) request.fetchLimit = limit;
     NSError *error = nil;

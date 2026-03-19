@@ -497,6 +497,7 @@ static int cmdMoveNote(id viewContext, NSString *title, NSString *fromFolder, NS
 static int cmdSearch(id viewContext, NSString *query, NSString *folderName) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
     NSMutableArray *predicates = [NSMutableArray array];
+    [predicates addObject:activeNotePredicate()];
     [predicates addObject:[NSPredicate predicateWithFormat:@"title CONTAINS[cd] %@ OR snippet CONTAINS[cd] %@", query, query]];
     if (folderName) {
         [predicates addObject:[NSPredicate predicateWithFormat:@"folder.title == %@", folderName]];

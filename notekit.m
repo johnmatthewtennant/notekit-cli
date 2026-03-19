@@ -757,6 +757,7 @@ static int cmdMoveNote(id viewContext, NSString *identifier, NSString *toFolder)
 static int cmdSearch(id viewContext, NSString *query, NSString *folderName) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
     NSMutableArray *predicates = [NSMutableArray array];
+    [predicates addObject:activeNotePredicate()];
     [predicates addObject:[NSPredicate predicateWithFormat:@"title CONTAINS[cd] %@ OR snippet CONTAINS[cd] %@", query, query]];
     if (folderName) {
         [predicates addObject:[NSPredicate predicateWithFormat:@"folder.title == %@", folderName]];
@@ -1424,7 +1425,10 @@ static NSArray *noteToParaModel(id note) {
             NSString *linkURL = nil;
             if (viewContext) {
                 NSFetchRequest *req = [[NSFetchRequest alloc] initWithEntityName:@"ICNote"];
-                req.predicate = [NSPredicate predicateWithFormat:@"title == %@", displayText];
+                req.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:@[
+                    activeNotePredicate(),
+                    [NSPredicate predicateWithFormat:@"title == %@", displayText]
+                ]];
                 req.fetchLimit = 1;
                 NSArray *results = [viewContext executeFetchRequest:req error:nil];
                 if (results.count > 0) {

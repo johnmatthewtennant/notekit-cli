@@ -133,7 +133,8 @@ int main(int argc, const char *argv[]) {
             if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", noteID]);
             BOOL dryRun = [opts[@"dry-run"] isEqualToString:@"true"];
             BOOL backupFlag = [opts[@"backup"] isEqualToString:@"true"];
-            return cmdWriteMarkdownNote(note, viewContext, dryRun, backupFlag);
+            BOOL diffMode = [opts[@"diff"] isEqualToString:@"true"];
+            return cmdWriteMarkdownNote(note, viewContext, dryRun, backupFlag, diffMode);
 
         } else if ([command isEqualToString:@"set-attr"]) {
             NSString *noteID = opts[@"id"];

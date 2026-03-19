@@ -648,7 +648,7 @@ static int cmdTest(id viewContext) {
         }
 
         NSString *checkedMd = [NSString stringWithFormat:@"# %@\n- [x] Unchecked item\n", toggleTitle];
-        cmdWriteMarkdownWithString(toggleNote, viewContext, checkedMd, NO, NO);
+        cmdWriteMarkdownWithString(toggleNote, viewContext, checkedMd, NO, NO, NO);
 
         toggleNote = findNoteByID(viewContext, toggleID);
         tDoc = ((id (*)(id, SEL))objc_msgSend)(toggleNote, sel_registerName("document"));
@@ -2812,7 +2812,7 @@ static int cmdTest(id viewContext) {
 
         // Write markdown with code block
         NSString *cbMarkdown = @"# __code_block_test__\n```\necho hello world\n```\nBody after code";
-        cmdWriteMarkdownWithString(cbNote, viewContext, cbMarkdown, NO, NO);
+        cmdWriteMarkdownWithString(cbNote, viewContext, cbMarkdown, NO, NO, NO);
 
         // Re-read the note and check the style
         cbNote = findNoteByID(viewContext, noteToDict(cbNote)[@"id"]);
@@ -2936,7 +2936,7 @@ static int cmdTest(id viewContext) {
         dup2(devNull1, STDOUT_FILENO); close(devNull1);
 
         NSString *newMd = [NSString stringWithFormat:@"# %@\nModified line\nUntouched line\n", mdTitle];
-        cmdWriteMarkdownWithString(mdNote, viewContext, newMd, NO, NO);
+        cmdWriteMarkdownWithString(mdNote, viewContext, newMd, NO, NO, NO);
 
         dup2(savedOut, STDOUT_FILENO); close(savedOut);
 
@@ -2982,7 +2982,7 @@ static int cmdTest(id viewContext) {
         dup2(devNull1, STDOUT_FILENO); close(devNull1);
 
         NSString *newMd = [NSString stringWithFormat:@"# %@\nExisting line\nNew line added\n", mdTitle];
-        cmdWriteMarkdownWithString(mdNote, viewContext, newMd, NO, NO);
+        cmdWriteMarkdownWithString(mdNote, viewContext, newMd, NO, NO, NO);
 
         dup2(savedOut, STDOUT_FILENO); close(savedOut);
 
@@ -3035,7 +3035,7 @@ static int cmdTest(id viewContext) {
         dup2(devNull1, STDOUT_FILENO); close(devNull1);
 
         NSString *newMd = [NSString stringWithFormat:@"# %@\nKeep me\nAlso keep\n", mdTitle];
-        cmdWriteMarkdownWithString(mdNote, viewContext, newMd, NO, NO);
+        cmdWriteMarkdownWithString(mdNote, viewContext, newMd, NO, NO, NO);
 
         dup2(savedOut, STDOUT_FILENO); close(savedOut);
 
@@ -3082,7 +3082,7 @@ static int cmdTest(id viewContext) {
         dup2(devNull1, STDOUT_FILENO); close(devNull1);
 
         NSString *newMd = [NSString stringWithFormat:@"# %@\nChanged text\n", mdTitle];
-        cmdWriteMarkdownWithString(mdNote, viewContext, newMd, YES, NO);
+        cmdWriteMarkdownWithString(mdNote, viewContext, newMd, YES, NO, NO);
 
         dup2(savedOut, STDOUT_FILENO); close(savedOut);
 
@@ -3126,7 +3126,7 @@ static int cmdTest(id viewContext) {
         dup2(devNull1, STDOUT_FILENO); close(devNull1);
 
         NSString *newMd = [NSString stringWithFormat:@"# %@\n- [x] Todo item\n", mdTitle];
-        cmdWriteMarkdownWithString(mdNote, viewContext, newMd, NO, NO);
+        cmdWriteMarkdownWithString(mdNote, viewContext, newMd, NO, NO, NO);
 
         dup2(savedOut, STDOUT_FILENO); close(savedOut);
         // Verify the checklist item is now checked
@@ -3467,7 +3467,7 @@ static int cmdTest(id viewContext) {
             int savedOut = dup(STDOUT_FILENO);
             int devNull1 = open("/dev/null", O_WRONLY);
             dup2(devNull1, STDOUT_FILENO); close(devNull1);
-            cmdWriteMarkdownWithString(rtNewNote, viewContext, rtMarkdown, NO, NO);
+            cmdWriteMarkdownWithString(rtNewNote, viewContext, rtMarkdown, NO, NO, NO);
             dup2(savedOut, STDOUT_FILENO); close(savedOut);
         }
 
@@ -3595,7 +3595,7 @@ static int cmdTest(id viewContext) {
 
             // Write markdown with bold, italic and underline
             NSString *biMd = [NSString stringWithFormat:@"# %@\n**bold word** and *italic word* and <u>underlined</u>", biTitle];
-            cmdWriteMarkdownWithString(biNote, viewContext, biMd, NO, NO);
+            cmdWriteMarkdownWithString(biNote, viewContext, biMd, NO, NO, NO);
             [viewContext save:nil];
 
             // Read back and check the model has bold/italic/underline runs

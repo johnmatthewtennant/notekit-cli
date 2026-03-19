@@ -13,7 +13,10 @@ generate: generate-notes-cli.py
 	python3 generate-notes-cli.py > notekit.m
 	$(MAKE) notekit
 
+install-hooks:
+	git config core.hooksPath .githooks
+
 clean:
 	rm -f notekit notes-inspect
 
-.PHONY: all clean generate
+.PHONY: all clean generate install-hooks

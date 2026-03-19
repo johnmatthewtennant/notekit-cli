@@ -3150,15 +3150,12 @@ static int cmdTest(id viewContext) {
     char exePath[PATH_MAX];
     uint32_t exeSize = sizeof(rawExePath);
     _NSGetExecutablePath(rawExePath, &exeSize);
-    realpath(rawExePath, exePath);
-
-    // --- Command Coverage Tests ---
-
-    // Verify executable path resolved successfully
-    if (exePath[0] == '\0') {
+    if (realpath(rawExePath, exePath) == NULL) {
         fprintf(stderr, "ERROR: Could not resolve executable path\n");
         return 1;
     }
+
+    // --- Command Coverage Tests ---
 
     // Helper: run subprocess and capture stdout
     #define RUN_CAPTURE(cmdStr, outData) do { \

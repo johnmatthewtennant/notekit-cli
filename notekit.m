@@ -2112,8 +2112,10 @@ static NSArray *markdownToParaModel(NSString *markdown) {
             }
         }
 
-        // Convert <br> to U+2028 (soft line break) for write round-trip fidelity
+        // Convert <br> variants to U+2028 (soft line break) for write round-trip fidelity
         if (textContent) {
+            textContent = [textContent stringByReplacingOccurrencesOfString:@"<br />" withString:@"\u2028"];
+            textContent = [textContent stringByReplacingOccurrencesOfString:@"<br/>" withString:@"\u2028"];
             textContent = [textContent stringByReplacingOccurrencesOfString:@"<br>" withString:@"\u2028"];
         }
 
@@ -2232,6 +2234,12 @@ static NSArray *computeParaOffsets(id note) {
     }
 
     return offsets;
+}
+
+// Convert para model text (which uses U+2028 for soft line breaks) to Apple Notes
+// storage format (which uses \n within a single attribute range).
+static NSString *storageTextForPara(NSString *text) {
+    return [text stringByReplacingOccurrencesOfString:@"\u2028" withString:@"\n"];
 }
 
 static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdown, BOOL dryRun, BOOL backup) {
@@ -2491,10 +2499,11 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
             NSString *oldText = oldPara[@"text"];
 
             if (![normalizeParaText(oldText) isEqualToString:normalizeParaText(newText)]) {
+                NSString *writeText = storageTextForPara(newText);
                 ((void (*)(id, SEL, NSRange))objc_msgSend)(ms, sel_registerName("deleteCharactersInRange:"),
                     NSMakeRange(pos, paraLen));
                 ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"),
-                    newText, pos);
+                    writeText, pos);
                 cumulativeDelta += (NSInteger)newText.length - (NSInteger)paraLen;
                 paraLen = newText.length;
             }
@@ -2610,7 +2619,7 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
         }
         else if ([opType isEqualToString:@"insert"]) {
             NSDictionary *newPara = op[@"newPara"];
-            NSString *newText = newPara[@"text"];
+            NSString *newText = storageTextForPara(newPara[@"text"]);
             NSString *toInsert = [NSString stringWithFormat:@"%@\n", newText];
 
             NSUInteger currentMsLenForInsert = (NSUInteger)((NSInteger)msLen + cumulativeDelta);

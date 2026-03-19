@@ -1075,6 +1075,8 @@ static int cmdCreateEmpty(id viewContext, NSString *folderName) {
     return 0;
 }
 
+
+
 static int cmdDelete(id viewContext, NSString *identifier) {
     id note = findNoteByID(viewContext, identifier);
     if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", identifier]);
@@ -1100,6 +1102,49 @@ static void saveNote(id note, id viewContext, NSUInteger newLength, NSInteger de
     NSError *error = nil;
     [viewContext save:&error];
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
+}
+
+
+static int cmdCreate(id viewContext, NSString *folderName, NSString *title, NSString *body, NSInteger styleValue) {
+    id targetFolder = nil;
+    NSArray *folders = fetchFolders(viewContext);
+    for (id folder in folders) {
+        NSString *fname = ((id (*)(id, SEL))objc_msgSend)(folder, sel_registerName("title"));
+        if ([fname isEqualToString:folderName]) { targetFolder = folder; break; }
+    }
+    if (!targetFolder) errorExit([NSString stringWithFormat:@"Folder not found: %@", folderName]);
+
+    id note = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), targetFolder);
+    if (!note) errorExit(@"Failed to create note");
+
+    id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+    id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+    NSUInteger oldLen = ((NSUInteger (*)(id, SEL))objc_msgSend)(ms, sel_registerName("length"));
+
+    ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("beginEditing"));
+
+    // Insert title
+    ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"), title, oldLen);
+    id titleStyle = makeParagraphStyle(0); // style 0 = title
+    ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
+        @{@"TTStyle": titleStyle}, NSMakeRange(oldLen, title.length));
+
+    NSUInteger currentLen = oldLen + title.length;
+
+    if (body) {
+        NSString *toInsert = [NSString stringWithFormat:@"\n%@", body];
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"), toInsert, currentLen);
+        NSInteger actualStyle = (styleValue >= 0) ? styleValue : 3;
+        id bodyStyle = makeParagraphStyle(actualStyle);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": bodyStyle}, NSMakeRange(currentLen + 1, body.length));
+        currentLen += toInsert.length;
+    }
+
+    NSInteger delta = (NSInteger)(currentLen - oldLen);
+    saveNote(note, viewContext, currentLen, delta);
+    printJSON(noteToDict(note));
+    return 0;
 }
 
 static int cmdAppend(id viewContext, NSString *identifier, NSString *text, NSInteger styleValue) {
@@ -5800,6 +5845,78 @@ static int cmdTest(id viewContext) {
         [viewContext save:nil];
     }
 
+    // Test 19: cmdCreate with title only
+    fprintf(stderr, "Test 19: cmdCreate with title only...\n");
+    {
+        NSString *createTitle = @"__create_test_title_only__";
+        int rc = cmdCreate(viewContext, testFolderName, createTitle, nil, -1);
+        id createdNote = findNote(viewContext, createTitle, testFolderName);
+        if (rc == 0 && createdNote) {
+            NSString *noteTitle = ((id (*)(id, SEL))objc_msgSend)(createdNote, sel_registerName("title"));
+            if ([noteTitle isEqualToString:createTitle]) {
+                fprintf(stderr, "  PASS\n"); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (title mismatch: %s)\n", [noteTitle UTF8String]); failed++;
+            }
+            deleteNote(createdNote, viewContext);
+            [viewContext save:nil];
+        } else {
+            fprintf(stderr, "  FAIL (create returned %d or note not found)\n", rc); failed++;
+        }
+    }
+
+    // Test 20: cmdCreate with title and body
+    fprintf(stderr, "Test 20: cmdCreate with title and body...\n");
+    {
+        NSString *createTitle = @"__create_test_with_body__";
+        NSString *createBody = @"This is the body text";
+        int rc = cmdCreate(viewContext, testFolderName, createTitle, createBody, -1);
+        id createdNote = findNote(viewContext, createTitle, testFolderName);
+        if (rc == 0 && createdNote) {
+            NSString *noteTitle = ((id (*)(id, SEL))objc_msgSend)(createdNote, sel_registerName("title"));
+            NSString *bodyText = ((id (*)(id, SEL))objc_msgSend)(createdNote, sel_registerName("noteAsPlainTextWithoutTitle"));
+            BOOL hasTitle = [noteTitle isEqualToString:createTitle];
+            BOOL hasBody = [bodyText containsString:createBody];
+            if (hasTitle && hasBody) {
+                fprintf(stderr, "  PASS\n"); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (title=%d body=%d)\n", hasTitle, hasBody); failed++;
+            }
+            deleteNote(createdNote, viewContext);
+            [viewContext save:nil];
+        } else {
+            fprintf(stderr, "  FAIL (create returned %d or note not found)\n", rc); failed++;
+        }
+    }
+
+    // Test 21: cmdCreate with title, body, and checklist style
+    fprintf(stderr, "Test 21: cmdCreate with body style...\n");
+    {
+        NSString *createTitle = @"__create_test_styled__";
+        NSString *createBody = @"Checklist item";
+        int rc = cmdCreate(viewContext, testFolderName, createTitle, createBody, 103);
+        id createdNote = findNote(viewContext, createTitle, testFolderName);
+        if (rc == 0 && createdNote) {
+            NSArray *paras = noteToParaModel(createdNote);
+            BOOL foundChecklist = NO;
+            for (NSDictionary *para in paras) {
+                if ([para[@"text"] containsString:@"Checklist item"] && [para[@"style"] integerValue] == 103) {
+                    foundChecklist = YES;
+                    break;
+                }
+            }
+            if (foundChecklist) {
+                fprintf(stderr, "  PASS\n"); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (checklist style not found in paragraphs)\n"); failed++;
+            }
+            deleteNote(createdNote, viewContext);
+            [viewContext save:nil];
+        } else {
+            fprintf(stderr, "  FAIL (create returned %d or note not found)\n", rc); failed++;
+        }
+    }
+
     // Test 19: Delete notes
     fprintf(stderr, "Test 19: Delete notes...\n");
     {
@@ -5967,6 +6084,7 @@ static void usage(void) {
     fprintf(stderr, "  notekit read (--title <title> | --id <id>) [--folder <name>]\n");
     fprintf(stderr, "  notekit read-attrs (--title <title> | --id <id>) [--folder <name>]\n");
     fprintf(stderr, "  notekit create-empty --folder <name>\n");
+    fprintf(stderr, "  notekit create --folder <name> --title <title> [--body <text>] [--style <n>]\n");
     fprintf(stderr, "  notekit delete --id <id>\n");
     fprintf(stderr, "  notekit append --id <id> --text <text> [--style <n>]\n");
     fprintf(stderr, "  notekit insert --id <id> --text <text> --position <n> [--style <n>] [--body-offset]\n");
@@ -6173,6 +6291,21 @@ int main(int argc, const char *argv[]) {
         } else if ([command isEqualToString:@"create-empty"]) {
             if (!folderName) { fprintf(stderr, "Error: --folder required\n"); usage(); return 1; }
             return cmdCreateEmpty(viewContext, folderName);
+
+        } else if ([command isEqualToString:@"create"]) {
+            if (!folderName) { fprintf(stderr, "Error: --folder required\n"); usage(); return 1; }
+            if (!kwTitle) { fprintf(stderr, "Error: --title required\n"); usage(); return 1; }
+            NSString *body = opts[@"body"];
+            NSInteger styleVal = -1;
+            if (opts[@"style"]) {
+                if (!isStrictInteger(opts[@"style"], &styleVal)) {
+                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                }
+                if (!isValidStyle(styleVal)) {
+                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                }
+            }
+            return cmdCreate(viewContext, folderName, kwTitle, body, styleVal);
 
         } else if ([command isEqualToString:@"delete"]) {
             NSString *noteID = opts[@"id"];

@@ -1546,12 +1546,31 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
         // Handle code block paragraphs (style 4) — no markdown escaping
         if (style == 4) {
             if (i > 0) [output appendString:@"\n"];
-            [output appendString:@"```\n"];
-            // Output raw text with embedded newlines preserved, no escaping
             // Replace U+2028 line separators back to newlines
             NSString *codeText = [rawText stringByReplacingOccurrencesOfString:@"\u2028" withString:@"\n"];
-            [output appendString:codeText];
-            [output appendString:@"\n```"];
+            // Choose fence that won't conflict with code content
+            // Count max run of backticks in code text to determine fence length
+            NSUInteger maxBacktickRun = 0;
+            NSUInteger currentRun = 0;
+            for (NSUInteger ci = 0; ci < codeText.length; ci++) {
+                if ([codeText characterAtIndex:ci] == '`') {
+                    currentRun++;
+                    if (currentRun > maxBacktickRun) maxBacktickRun = currentRun;
+                } else {
+                    currentRun = 0;
+                }
+            }
+            NSUInteger fenceLen = MAX(3, maxBacktickRun + 1);
+            NSMutableString *fence = [NSMutableString string];
+            for (NSUInteger fi = 0; fi < fenceLen; fi++) [fence appendString:@"`"];
+
+            [output appendString:fence];
+            [output appendString:@"\n"];
+            if (codeText.length > 0) {
+                [output appendString:codeText];
+                [output appendString:@"\n"];
+            }
+            [output appendString:fence];
             continue;
         }
 
@@ -2033,36 +2052,75 @@ static NSArray *markdownToParaModel(NSString *markdown) {
     NSMutableArray *paragraphs = [NSMutableArray array];
     BOOL inCodeBlock = NO;
     NSMutableString *codeBlockAccumulator = nil;
+    unichar fenceChar = 0;         // '`' or '~'
+    NSUInteger fenceLength = 0;    // length of opening fence
+    BOOL codeBlockFirstLine = YES;
 
     for (NSUInteger lineIdx = 0; lineIdx < lines.count; lineIdx++) {
         NSString *line = lines[lineIdx];
 
-        // Check for fenced code block delimiter (``` optionally followed by language)
-        if ([line hasPrefix:@"```"]) {
-            if (!inCodeBlock) {
-                // Opening fence — start accumulating code block lines
-                inCodeBlock = YES;
-                codeBlockAccumulator = [NSMutableString string];
-                continue;
-            } else {
-                // Closing fence — emit accumulated code block as style 4 paragraph
-                inCodeBlock = NO;
-                NSMutableDictionary *para = [NSMutableDictionary dictionary];
-                para[@"style"] = @(4);
-                para[@"indent"] = @(0);
-                para[@"text"] = [codeBlockAccumulator copy];
-                [paragraphs addObject:para];
-                codeBlockAccumulator = nil;
-                continue;
+        // Check for fenced code block delimiter (``` or ~~~ optionally followed by info string)
+        if (!inCodeBlock) {
+            // Opening fence: 3+ consecutive backticks or tildes, optional info string
+            NSUInteger runLen = 0;
+            unichar fc = 0;
+            if (line.length >= 3) {
+                fc = [line characterAtIndex:0];
+                if (fc == '`' || fc == '~') {
+                    runLen = 1;
+                    while (runLen < line.length && [line characterAtIndex:runLen] == fc) runLen++;
+                }
+            }
+            if (runLen >= 3) {
+                // For backtick fences, info string must not contain backticks
+                BOOL validOpener = YES;
+                if (fc == '`') {
+                    NSString *rest = [line substringFromIndex:runLen];
+                    if ([rest rangeOfString:@"`"].location != NSNotFound) validOpener = NO;
+                }
+                if (validOpener) {
+                    inCodeBlock = YES;
+                    fenceChar = fc;
+                    fenceLength = runLen;
+                    codeBlockAccumulator = [NSMutableString string];
+                    codeBlockFirstLine = YES;
+                    continue;
+                }
+            }
+        } else {
+            // Closing fence: same char, >= opening length, only optional trailing spaces
+            NSUInteger runLen = 0;
+            if (line.length >= fenceLength && [line characterAtIndex:0] == fenceChar) {
+                runLen = 1;
+                while (runLen < line.length && [line characterAtIndex:runLen] == fenceChar) runLen++;
+                if (runLen >= fenceLength) {
+                    // Rest must be only spaces
+                    NSString *rest = [line substringFromIndex:runLen];
+                    NSString *trimmed = [rest stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                    if (trimmed.length == 0) {
+                        // Closing fence — emit accumulated code block as style 4 paragraph
+                        inCodeBlock = NO;
+                        NSMutableDictionary *para = [NSMutableDictionary dictionary];
+                        para[@"style"] = @(4);
+                        para[@"indent"] = @(0);
+                        para[@"text"] = [codeBlockAccumulator copy];
+                        [paragraphs addObject:para];
+                        codeBlockAccumulator = nil;
+                        fenceChar = 0;
+                        fenceLength = 0;
+                        continue;
+                    }
+                }
             }
         }
 
         // Inside a code block — accumulate lines with embedded newlines
         if (inCodeBlock) {
-            if (codeBlockAccumulator.length > 0) {
+            if (!codeBlockFirstLine) {
                 [codeBlockAccumulator appendString:@"\n"];
             }
             [codeBlockAccumulator appendString:line];
+            codeBlockFirstLine = NO;
             continue;
         }
 
@@ -4933,6 +4991,53 @@ static int cmdTest(id viewContext) {
         // Test 7: Round-trip with multiple code blocks
         NSString *rt6 = paraModelToMarkdown(parsed6);
         if (![rt6 isEqualToString:md6]) { ok = NO; fprintf(stderr, "    FAIL: multiple round-trip:\n    got:  '%s'\n    want: '%s'\n", [rt6 UTF8String], [md6 UTF8String]); }
+
+        // Test 8: Empty code block
+        NSString *md8 = @"# Title\n```\n```\nBody";
+        NSArray *parsed8 = markdownToParaModel(md8);
+        if (parsed8.count != 3) { ok = NO; fprintf(stderr, "    FAIL: empty code block: expected 3 paragraphs, got %lu\n", (unsigned long)parsed8.count); }
+        else {
+            if ([parsed8[1][@"style"] integerValue] != 4) { ok = NO; fprintf(stderr, "    FAIL: empty code block: style is %ld\n", (long)[parsed8[1][@"style"] integerValue]); }
+            if (![parsed8[1][@"text"] isEqualToString:@""]) { ok = NO; fprintf(stderr, "    FAIL: empty code block: text is '%s', expected empty\n", [parsed8[1][@"text"] UTF8String]); }
+        }
+        // Empty code block round-trip
+        NSString *rt8 = paraModelToMarkdown(parsed8);
+        if (![rt8 isEqualToString:md8]) { ok = NO; fprintf(stderr, "    FAIL: empty code block round-trip:\n    got:  '%s'\n    want: '%s'\n", [rt8 UTF8String], [md8 UTF8String]); }
+
+        // Test 9: Leading empty line in code block
+        NSString *md9 = @"# Title\n```\n\nline after blank\n```";
+        NSArray *parsed9 = markdownToParaModel(md9);
+        if (parsed9.count != 2) { ok = NO; fprintf(stderr, "    FAIL: leading blank: expected 2 paragraphs, got %lu\n", (unsigned long)parsed9.count); }
+        else {
+            NSString *expected9 = @"\nline after blank";
+            if (![parsed9[1][@"text"] isEqualToString:expected9]) { ok = NO; fprintf(stderr, "    FAIL: leading blank: text is '%s', expected '%s'\n", [parsed9[1][@"text"] UTF8String], [expected9 UTF8String]); }
+        }
+
+        // Test 10: Code containing triple backtick-like lines (should not close fence)
+        NSString *md10 = @"# Title\n````\nSome ```code``` here\n````";
+        NSArray *parsed10 = markdownToParaModel(md10);
+        if (parsed10.count != 2) { ok = NO; fprintf(stderr, "    FAIL: backtick content: expected 2 paragraphs, got %lu\n", (unsigned long)parsed10.count); }
+        else {
+            if (![parsed10[1][@"text"] isEqualToString:@"Some ```code``` here"]) { ok = NO; fprintf(stderr, "    FAIL: backtick content: text is '%s'\n", [parsed10[1][@"text"] UTF8String]); }
+        }
+
+        // Test 11: Tilde fence
+        NSString *md11 = @"# Title\n~~~\ncode in tildes\n~~~";
+        NSArray *parsed11 = markdownToParaModel(md11);
+        if (parsed11.count != 2) { ok = NO; fprintf(stderr, "    FAIL: tilde fence: expected 2 paragraphs, got %lu\n", (unsigned long)parsed11.count); }
+        else {
+            if ([parsed11[1][@"style"] integerValue] != 4) { ok = NO; fprintf(stderr, "    FAIL: tilde fence: style is %ld\n", (long)[parsed11[1][@"style"] integerValue]); }
+            if (![parsed11[1][@"text"] isEqualToString:@"code in tildes"]) { ok = NO; fprintf(stderr, "    FAIL: tilde fence: text is '%s'\n", [parsed11[1][@"text"] UTF8String]); }
+        }
+
+        // Test 12: Closing fence must match opening char (backtick opened, tilde doesn't close)
+        NSString *md12 = @"# Title\n```\nline1\n~~~\nline2\n```";
+        NSArray *parsed12 = markdownToParaModel(md12);
+        if (parsed12.count != 2) { ok = NO; fprintf(stderr, "    FAIL: fence char mismatch: expected 2 paragraphs, got %lu\n", (unsigned long)parsed12.count); }
+        else {
+            NSString *expected12 = @"line1\n~~~\nline2";
+            if (![parsed12[1][@"text"] isEqualToString:expected12]) { ok = NO; fprintf(stderr, "    FAIL: fence char mismatch: text is '%s'\n", [parsed12[1][@"text"] UTF8String]); }
+        }
 
         if (ok) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL\n"); failed++; }

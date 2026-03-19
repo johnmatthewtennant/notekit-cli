@@ -800,28 +800,42 @@ static int cmdTest(id viewContext) {
     NSString *testTitle = @"__notes_cli_test__";
     NSString *testTitle2 = @"__notes_cli_test_2__";
 
-    // Cleanup leftover test data — loop until no test folders remain
+    // Cleanup leftover test data — loop until no test folders remain (max 1000 iterations)
     {
         Class ICFolder = NSClassFromString(@"ICFolder");
         int cleanedCount = 0;
+        int maxIter = 1000;
         BOOL found = YES;
-        while (found) {
+        while (found && maxIter-- > 0) {
             found = NO;
             NSArray *allFolders = fetchFolders(viewContext);
             for (id f in allFolders) {
                 NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
                 if ([fname isEqualToString:testFolderName] ||
                     [fname isEqualToString:@"__notes_cli_test_folder_2__"]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), f);
+                    // deleteFolder: marks for CloudKit sync deletion (app layer).
+                    // deleteObject: removes from Core Data context so re-fetch won't return it.
+                    // Both are needed: deleteFolder: alone leaves stale context; deleteObject: alone skips sync.
+                    @try {
+                        ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), f);
+                    } @catch (id e) {
+                        fprintf(stderr, "Warning: deleteFolder: threw exception during cleanup\\n");
+                    }
                     [viewContext deleteObject:f];
-                    [viewContext save:nil];
+                    NSError *saveErr = nil;
+                    if (![viewContext save:&saveErr]) {
+                        fprintf(stderr, "Warning: save failed during cleanup: %s\\n",
+                                [[saveErr localizedDescription] UTF8String]);
+                    }
                     cleanedCount++;
                     found = YES;
                     break; // re-fetch after each delete to avoid stale references
                 }
             }
         }
-        if (cleanedCount > 0) {
+        if (maxIter <= 0) {
+            fprintf(stderr, "Warning: cleanup loop hit max iterations, %d folders deleted\\n", cleanedCount);
+        } else if (cleanedCount > 0) {
             fprintf(stderr, "Cleaned up %d leftover test folder(s)\\n", cleanedCount);
         }
     }
@@ -1106,10 +1120,18 @@ static int cmdTest(id viewContext) {
             } else { fprintf(stderr, "  FAIL (not in target folder)\\n"); failed++; }
         } else { fprintf(stderr, "  FAIL\\n"); failed++; }
 
-        // Cleanup second folder
-        ((void (*)(id, SEL, id))objc_msgSend)(ICFolder2, sel_registerName("deleteFolder:"), tf2);
+        // Cleanup second folder (deleteFolder: for sync, deleteObject: for context)
+        @try {
+            ((void (*)(id, SEL, id))objc_msgSend)(ICFolder2, sel_registerName("deleteFolder:"), tf2);
+        } @catch (id e) {
+            fprintf(stderr, "  Warning: deleteFolder: threw exception cleaning up folder_2\\n");
+        }
         [viewContext deleteObject:tf2];
-        [viewContext save:nil];
+        NSError *saveErr11 = nil;
+        if (![viewContext save:&saveErr11]) {
+            fprintf(stderr, "  Warning: save failed cleaning up folder_2: %s\\n",
+                    [[saveErr11 localizedDescription] UTF8String]);
+        }
     }
 
     // Test 11: Pin
@@ -1253,9 +1275,19 @@ static int cmdTest(id viewContext) {
             if ([fname isEqualToString:testFolderName]) { tf = f; break; }
         }
         if (tf) {
-            ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), tf);
+            // deleteFolder: marks for CloudKit sync deletion (app layer).
+            // deleteObject: removes from Core Data context so re-fetch won't return it.
+            @try {
+                ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), tf);
+            } @catch (id e) {
+                fprintf(stderr, "  Warning: deleteFolder: threw exception\\n");
+            }
             [viewContext deleteObject:tf];
-            [viewContext save:nil];
+            NSError *saveErr = nil;
+            if (![viewContext save:&saveErr]) {
+                fprintf(stderr, "  Warning: save failed: %s\\n",
+                        [[saveErr localizedDescription] UTF8String]);
+            }
             // Verify test folder is gone from Core Data context
             BOOL foundTestFolder = NO;
             for (id f in fetchFolders(viewContext)) {

@@ -373,6 +373,15 @@ static int cmdReadAttrsNote(id note) {
         id strikethrough = attrs[@"TTStrikethrough"];
         if (strikethrough) entry[@"strikethrough"] = strikethrough;
 
+        id ttHints = attrs[@"TTHints"];
+        if (ttHints) {
+            NSUInteger hints = [ttHints unsignedIntegerValue];
+            if (hints & 1) entry[@"bold"] = @YES;
+            if (hints & 2) entry[@"italic"] = @YES;
+        }
+        id ttUnderline = attrs[@"TTUnderline"];
+        if (ttUnderline) entry[@"underline"] = @YES;
+
         id attachment = attrs[@"NSAttachment"];
         if (attachment) entry[@"hasAttachment"] = @YES;
 
@@ -1353,6 +1362,9 @@ static void emitParagraph(NSMutableArray *paragraphs, NSString *text, NSArray *r
             if (run[@"link"]) adjRun[@"link"] = run[@"link"];
             if (run[@"noteLinkDisplayText"]) adjRun[@"noteLinkDisplayText"] = run[@"noteLinkDisplayText"];
             if ([run[@"strikethrough"] boolValue]) adjRun[@"strikethrough"] = @YES;
+            if ([run[@"bold"] boolValue]) adjRun[@"bold"] = @YES;
+            if ([run[@"italic"] boolValue]) adjRun[@"italic"] = @YES;
+            if ([run[@"underline"] boolValue]) adjRun[@"underline"] = @YES;
             [adjRuns addObject:adjRun];
         }
         if (adjRuns.count > 0) para[@"runs"] = adjRuns;
@@ -1451,6 +1463,14 @@ static NSArray *noteToParaModel(id note) {
             }
             id strikethrough = attrs[@"TTStrikethrough"];
             if (strikethrough) run[@"strikethrough"] = @YES;
+            id ttHints1 = attrs[@"TTHints"];
+            if (ttHints1) {
+                NSUInteger hints1 = [ttHints1 unsignedIntegerValue];
+                if (hints1 & 1) run[@"bold"] = @YES;
+                if (hints1 & 2) run[@"italic"] = @YES;
+            }
+            id ttUnderline1 = attrs[@"TTUnderline"];
+            if (ttUnderline1) run[@"underline"] = @YES;
             [currentRuns addObject:run];
             [currentText appendString:chunk];
             runOffsetInPara += chunk.length;
@@ -1484,6 +1504,14 @@ static NSArray *noteToParaModel(id note) {
             }
             id strikethrough = attrs[@"TTStrikethrough"];
             if (strikethrough) run[@"strikethrough"] = @YES;
+            id ttHints2 = attrs[@"TTHints"];
+            if (ttHints2) {
+                NSUInteger hints2 = [ttHints2 unsignedIntegerValue];
+                if (hints2 & 1) run[@"bold"] = @YES;
+                if (hints2 & 2) run[@"italic"] = @YES;
+            }
+            id ttUnderline2 = attrs[@"TTUnderline"];
+            if (ttUnderline2) run[@"underline"] = @YES;
             [currentRuns addObject:run];
             runOffsetInPara = chunk.length;
         }
@@ -1570,6 +1598,20 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
                 // Apply strikethrough wrapping
                 if ([run[@"strikethrough"] boolValue]) {
                     escaped = [NSString stringWithFormat:@"~~%@~~", escaped];
+                }
+                // Apply underline wrapping
+                if ([run[@"underline"] boolValue]) {
+                    escaped = [NSString stringWithFormat:@"<u>%@</u>", escaped];
+                }
+                // Apply bold/italic wrapping
+                BOOL isBold = [run[@"bold"] boolValue];
+                BOOL isItalic = [run[@"italic"] boolValue];
+                if (isBold && isItalic) {
+                    escaped = [NSString stringWithFormat:@"***%@***", escaped];
+                } else if (isBold) {
+                    escaped = [NSString stringWithFormat:@"**%@**", escaped];
+                } else if (isItalic) {
+                    escaped = [NSString stringWithFormat:@"*%@*", escaped];
                 }
 
                 [fmt appendString:escaped];
@@ -1686,6 +1728,105 @@ static void parseInlineFormatting(NSString *lineText, NSMutableString *outPlainT
 
     while (i < len) {
         unichar c = [lineText characterAtIndex:i];
+
+        // Check for bold+italic ***text***
+        if (c == '*' && i + 2 < len && [lineText characterAtIndex:i + 1] == '*' && [lineText characterAtIndex:i + 2] == '*') {
+            NSRange closeRange = [lineText rangeOfString:@"***" options:0
+                range:NSMakeRange(i + 3, len - i - 3)];
+            if (closeRange.location != NSNotFound && closeRange.location > i + 3) {
+                NSString *inner = [lineText substringWithRange:NSMakeRange(i + 3, closeRange.location - i - 3)];
+                NSMutableString *innerPlain = [NSMutableString string];
+                NSMutableArray *innerRuns = [NSMutableArray array];
+                parseInlineFormatting(inner, innerPlain, innerRuns);
+
+                NSUInteger baseOffset = outPlainText.length;
+                [outPlainText appendString:innerPlain];
+
+                for (NSMutableDictionary *innerRun in innerRuns) {
+                    innerRun[@"start"] = @([innerRun[@"start"] unsignedIntegerValue] + baseOffset);
+                    innerRun[@"bold"] = @YES;
+                    innerRun[@"italic"] = @YES;
+                    [outRuns addObject:innerRun];
+                }
+                if (innerRuns.count == 0 && innerPlain.length > 0) {
+                    [outRuns addObject:[@{
+                        @"start": @(baseOffset),
+                        @"length": @(innerPlain.length),
+                        @"bold": @YES,
+                        @"italic": @YES
+                    } mutableCopy]];
+                }
+                i = closeRange.location + 3;
+                continue;
+            }
+        }
+
+        // Check for bold **text**
+        if (c == '*' && i + 1 < len && [lineText characterAtIndex:i + 1] == '*') {
+            // Make sure it's not *** (already handled above)
+            if (!(i + 2 < len && [lineText characterAtIndex:i + 2] == '*')) {
+                NSRange closeRange = [lineText rangeOfString:@"**" options:0
+                    range:NSMakeRange(i + 2, len - i - 2)];
+                if (closeRange.location != NSNotFound && closeRange.location > i + 2) {
+                    NSString *inner = [lineText substringWithRange:NSMakeRange(i + 2, closeRange.location - i - 2)];
+                    NSMutableString *innerPlain = [NSMutableString string];
+                    NSMutableArray *innerRuns = [NSMutableArray array];
+                    parseInlineFormatting(inner, innerPlain, innerRuns);
+
+                    NSUInteger baseOffset = outPlainText.length;
+                    [outPlainText appendString:innerPlain];
+
+                    for (NSMutableDictionary *innerRun in innerRuns) {
+                        innerRun[@"start"] = @([innerRun[@"start"] unsignedIntegerValue] + baseOffset);
+                        innerRun[@"bold"] = @YES;
+                        [outRuns addObject:innerRun];
+                    }
+                    if (innerRuns.count == 0 && innerPlain.length > 0) {
+                        [outRuns addObject:[@{
+                            @"start": @(baseOffset),
+                            @"length": @(innerPlain.length),
+                            @"bold": @YES
+                        } mutableCopy]];
+                    }
+                    i = closeRange.location + 2;
+                    continue;
+                }
+            }
+        }
+
+        // Check for italic *text*
+        if (c == '*' && !(i + 1 < len && [lineText characterAtIndex:i + 1] == '*')) {
+            NSRange closeRange = [lineText rangeOfString:@"*" options:0
+                range:NSMakeRange(i + 1, len - i - 1)];
+            if (closeRange.location != NSNotFound && closeRange.location > i + 1) {
+                // Make sure the closing * is not part of ** or ***
+                BOOL isDouble = (closeRange.location + 1 < len && [lineText characterAtIndex:closeRange.location + 1] == '*');
+                if (!isDouble) {
+                    NSString *inner = [lineText substringWithRange:NSMakeRange(i + 1, closeRange.location - i - 1)];
+                    NSMutableString *innerPlain = [NSMutableString string];
+                    NSMutableArray *innerRuns = [NSMutableArray array];
+                    parseInlineFormatting(inner, innerPlain, innerRuns);
+
+                    NSUInteger baseOffset = outPlainText.length;
+                    [outPlainText appendString:innerPlain];
+
+                    for (NSMutableDictionary *innerRun in innerRuns) {
+                        innerRun[@"start"] = @([innerRun[@"start"] unsignedIntegerValue] + baseOffset);
+                        innerRun[@"italic"] = @YES;
+                        [outRuns addObject:innerRun];
+                    }
+                    if (innerRuns.count == 0 && innerPlain.length > 0) {
+                        [outRuns addObject:[@{
+                            @"start": @(baseOffset),
+                            @"length": @(innerPlain.length),
+                            @"italic": @YES
+                        } mutableCopy]];
+                    }
+                    i = closeRange.location + 1;
+                    continue;
+                }
+            }
+        }
 
         // Check for strikethrough ~~text~~
         if (c == '~' && i + 1 < len && [lineText characterAtIndex:i + 1] == '~') {
@@ -2016,6 +2157,9 @@ static BOOL inlineRunsEqual(NSArray *a, NSArray *b) {
         if (![ra[@"link"] isEqual:rb[@"link"]] &&
             !(ra[@"link"] == nil && rb[@"link"] == nil)) return NO;
         if ([ra[@"strikethrough"] boolValue] != [rb[@"strikethrough"] boolValue]) return NO;
+        if ([ra[@"bold"] boolValue] != [rb[@"bold"] boolValue]) return NO;
+        if ([ra[@"italic"] boolValue] != [rb[@"italic"] boolValue]) return NO;
+        if ([ra[@"underline"] boolValue] != [rb[@"underline"] boolValue]) return NO;
     }
     return YES;
 }
@@ -2385,6 +2529,8 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
                 patchedAttrs[@"TTStyle"] = patchedStyle;
                 [patchedAttrs removeObjectForKey:@"NSLink"];
                 [patchedAttrs removeObjectForKey:@"TTStrikethrough"];
+                [patchedAttrs removeObjectForKey:@"TTHints"];
+                [patchedAttrs removeObjectForKey:@"TTUnderline"];
 
                 ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
                     patchedAttrs, NSMakeRange(pos, paraLen));
@@ -2449,6 +2595,13 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
                             }
                         }
                         if ([run[@"strikethrough"] boolValue]) runAttrs[@"TTStrikethrough"] = @1;
+                        {
+                            NSUInteger hints = 0;
+                            if ([run[@"bold"] boolValue]) hints |= 1;
+                            if ([run[@"italic"] boolValue]) hints |= 2;
+                            if (hints > 0) runAttrs[@"TTHints"] = @(hints);
+                        }
+                        if ([run[@"underline"] boolValue]) runAttrs[@"TTUnderline"] = @1;
                         ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
                             runAttrs, NSMakeRange(pos + runStart, runLen));
                     }
@@ -2548,6 +2701,13 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
                         }
                     }
                     if ([run[@"strikethrough"] boolValue]) runAttrs[@"TTStrikethrough"] = @1;
+                    {
+                        NSUInteger hints = 0;
+                        if ([run[@"bold"] boolValue]) hints |= 1;
+                        if ([run[@"italic"] boolValue]) hints |= 2;
+                        if (hints > 0) runAttrs[@"TTHints"] = @(hints);
+                    }
+                    if ([run[@"underline"] boolValue]) runAttrs[@"TTUnderline"] = @1;
                     ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
                         runAttrs, NSMakeRange(pos + runStart, runLen));
                 }
@@ -4388,6 +4548,198 @@ static int cmdTest(id viewContext) {
         [viewContext save:nil];
     }
 
+    // Test: read-markdown with bold
+    fprintf(stderr, "Test: read-markdown bold...\n");
+    {
+        NSString *mdTitle = @"__md_test_bold__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        NSString *mdContent = [NSString stringWithFormat:@"%@\nBold text", mdTitle];
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdContent, 0);
+        id s0b = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0b, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0b}, NSMakeRange(0, mdTitle.length + 1));
+        id s3b = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3b, sel_registerName("setStyle:"), 3);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            (@{@"TTStyle": s3b, @"TTHints": @1}),
+            NSMakeRange(mdTitle.length + 1, 9));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSArray *model = noteToParaModel(mdNote);
+        NSMutableArray *filtered = [NSMutableArray array];
+        BOOL fc = NO;
+        for (NSDictionary *p in model) {
+            if (!fc && [p[@"text"] length] == 0) continue;
+            fc = YES;
+            [filtered addObject:p];
+        }
+        NSString *markdown = paraModelToMarkdown(filtered);
+        if ([markdown containsString:@"**Bold text**"]) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
+
+        deleteNote(mdNote, viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: read-markdown with italic
+    fprintf(stderr, "Test: read-markdown italic...\n");
+    {
+        NSString *mdTitle = @"__md_test_italic__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        NSString *mdContent = [NSString stringWithFormat:@"%@\nItalic text", mdTitle];
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdContent, 0);
+        id s0i = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0i, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0i}, NSMakeRange(0, mdTitle.length + 1));
+        id s3i = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3i, sel_registerName("setStyle:"), 3);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            (@{@"TTStyle": s3i, @"TTHints": @2}),
+            NSMakeRange(mdTitle.length + 1, 11));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSArray *model = noteToParaModel(mdNote);
+        NSMutableArray *filtered = [NSMutableArray array];
+        BOOL fc = NO;
+        for (NSDictionary *p in model) {
+            if (!fc && [p[@"text"] length] == 0) continue;
+            fc = YES;
+            [filtered addObject:p];
+        }
+        NSString *markdown = paraModelToMarkdown(filtered);
+        if ([markdown containsString:@"*Italic text*"]) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
+
+        deleteNote(mdNote, viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: read-markdown with bold+italic
+    fprintf(stderr, "Test: read-markdown bold+italic...\n");
+    {
+        NSString *mdTitle = @"__md_test_bolditalic__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        NSString *mdContent = [NSString stringWithFormat:@"%@\nBoth text", mdTitle];
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdContent, 0);
+        id s0bi = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0bi, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0bi}, NSMakeRange(0, mdTitle.length + 1));
+        id s3bi = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3bi, sel_registerName("setStyle:"), 3);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            (@{@"TTStyle": s3bi, @"TTHints": @3}),
+            NSMakeRange(mdTitle.length + 1, 9));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSArray *model = noteToParaModel(mdNote);
+        NSMutableArray *filtered = [NSMutableArray array];
+        BOOL fc = NO;
+        for (NSDictionary *p in model) {
+            if (!fc && [p[@"text"] length] == 0) continue;
+            fc = YES;
+            [filtered addObject:p];
+        }
+        NSString *markdown = paraModelToMarkdown(filtered);
+        if ([markdown containsString:@"***Both text***"]) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
+
+        deleteNote(mdNote, viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: read-markdown with underline
+    fprintf(stderr, "Test: read-markdown underline...\n");
+    {
+        NSString *mdTitle = @"__md_test_underline__";
+        id mdNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id mdDoc = ((id (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("document"));
+        id mdMs = ((id (*)(id, SEL))objc_msgSend)(mdDoc, sel_registerName("mergeableString"));
+        NSString *mdContent = [NSString stringWithFormat:@"%@\nUnderlined", mdTitle];
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(mdMs, sel_registerName("insertString:atIndex:"), mdContent, 0);
+        id s0u = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s0u, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": s0u}, NSMakeRange(0, mdTitle.length + 1));
+        id s3u = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s3u, sel_registerName("setStyle:"), 3);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(mdMs, sel_registerName("setAttributes:range:"),
+            (@{@"TTStyle": s3u, @"TTUnderline": @1}),
+            NSMakeRange(mdTitle.length + 1, 10));
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            mdNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, mdContent.length), mdContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(mdNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSArray *model = noteToParaModel(mdNote);
+        NSMutableArray *filtered = [NSMutableArray array];
+        BOOL fc = NO;
+        for (NSDictionary *p in model) {
+            if (!fc && [p[@"text"] length] == 0) continue;
+            fc = YES;
+            [filtered addObject:p];
+        }
+        NSString *markdown = paraModelToMarkdown(filtered);
+        if ([markdown containsString:@"<u>Underlined</u>"]) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
+
+        deleteNote(mdNote, viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: bold/italic/underline parse round-trip
+    fprintf(stderr, "Test: bold/italic/underline parse round-trip...\n");
+    {
+        NSString *input = @"**bold** and *italic* and ***both*** and <u>underlined</u>";
+        NSMutableString *plain = [NSMutableString string];
+        NSMutableArray *runs = [NSMutableArray array];
+        parseInlineFormatting(input, plain, runs);
+
+        // Check plain text has formatting stripped
+        BOOL plainOk = [plain isEqualToString:@"bold and italic and both and underlined"];
+
+        // Check runs have correct properties
+        BOOL runsOk = YES;
+        BOOL foundBold = NO, foundItalic = NO, foundBoth = NO, foundUnderline = NO;
+        for (NSDictionary *run in runs) {
+            NSString *text = [plain substringWithRange:NSMakeRange([run[@"start"] unsignedIntegerValue], [run[@"length"] unsignedIntegerValue])];
+            if ([text isEqualToString:@"bold"] && [run[@"bold"] boolValue] && ![run[@"italic"] boolValue]) foundBold = YES;
+            if ([text isEqualToString:@"italic"] && [run[@"italic"] boolValue] && ![run[@"bold"] boolValue]) foundItalic = YES;
+            if ([text isEqualToString:@"both"] && [run[@"bold"] boolValue] && [run[@"italic"] boolValue]) foundBoth = YES;
+            if ([text isEqualToString:@"underlined"] && [run[@"underline"] boolValue]) foundUnderline = YES;
+        }
+        runsOk = foundBold && foundItalic && foundBoth && foundUnderline;
+
+        if (plainOk && runsOk) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (plain=%s, bold=%d, italic=%d, both=%d, underline=%d)\n",
+            [plain UTF8String], foundBold, foundItalic, foundBoth, foundUnderline); failed++; }
+    }
+
     // Test: markdown escape/unescape round-trip
     fprintf(stderr, "Test: markdown escape round-trip...\n");
     {
@@ -5200,6 +5552,51 @@ static int cmdTest(id viewContext) {
 
         if (rtPass) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (%s)\n", [rtFailMsg UTF8String]); failed++; }
+
+        // --- Test: Bold/italic/underline write-back round-trip ---
+        fprintf(stderr, "Test: Bold/italic write-back round-trip...\n");
+        {
+            // Write markdown with bold and italic to a fresh note, then read back and verify TTHints
+            NSString *biTitle = @"__bi_write_test__";
+            id biNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+            ((void (*)(id, SEL))objc_msgSend)(biNote, sel_registerName("beginEditing"));
+            id biDoc = ((id (*)(id, SEL))objc_msgSend)(biNote, sel_registerName("document"));
+            id biMs = ((id (*)(id, SEL))objc_msgSend)(biDoc, sel_registerName("mergeableString"));
+            ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(biMs, sel_registerName("insertString:atIndex:"), biTitle, 0);
+            id biS0 = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(biS0, sel_registerName("setStyle:"), 0);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(biMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": biS0}, NSMakeRange(0, biTitle.length));
+            ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+                biNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, biTitle.length), biTitle.length);
+            ((void (*)(id, SEL))objc_msgSend)(biNote, sel_registerName("endEditing"));
+            ((void (*)(id, SEL))objc_msgSend)(biNote, sel_registerName("saveNoteData"));
+            [viewContext save:nil];
+
+            // Write markdown with bold, italic and underline
+            NSString *biMd = [NSString stringWithFormat:@"# %@\n**bold word** and *italic word* and <u>underlined</u>", biTitle];
+            cmdWriteMarkdownWithString(biNote, viewContext, biMd, NO, NO);
+            [viewContext save:nil];
+
+            // Read back and check the model has bold/italic/underline runs
+            NSArray *biModel = noteToParaModel(biNote);
+            NSMutableArray *biFiltered = [NSMutableArray array];
+            BOOL biFC = NO;
+            for (NSDictionary *p in biModel) {
+                if (!biFC && [p[@"text"] length] == 0) continue;
+                biFC = YES;
+                [biFiltered addObject:p];
+            }
+            NSString *biMarkdown = paraModelToMarkdown(biFiltered);
+            BOOL biPass = [biMarkdown containsString:@"**bold word**"] &&
+                          [biMarkdown containsString:@"*italic word*"] &&
+                          [biMarkdown containsString:@"<u>underlined</u>"];
+            if (biPass) { fprintf(stderr, "  PASS\n"); passed++; }
+            else { fprintf(stderr, "  FAIL (md: %s)\n", [biMarkdown UTF8String]); failed++; }
+
+            deleteNote(biNote, viewContext);
+            [viewContext save:nil];
+        }
 
         // --- Test: Raw attribute round-trip ---
         fprintf(stderr, "Test: Raw attribute round-trip...\n");

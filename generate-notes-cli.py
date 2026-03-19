@@ -262,6 +262,15 @@ static int cmdReadAttrs(id viewContext, NSString *title, NSString *folderName) {
         id strikethrough = attrs[@"TTStrikethrough"];
         if (strikethrough) entry[@"strikethrough"] = strikethrough;
 
+        id ttHints = attrs[@"TTHints"];
+        if (ttHints) {
+            NSUInteger hints = [ttHints unsignedIntegerValue];
+            if (hints & 1) entry[@"bold"] = @YES;
+            if (hints & 2) entry[@"italic"] = @YES;
+        }
+        id ttUnderline = attrs[@"TTUnderline"];
+        if (ttUnderline) entry[@"underline"] = @YES;
+
         id attachment = attrs[@"NSAttachment"];
         if (attachment) entry[@"hasAttachment"] = @YES;
 

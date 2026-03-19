@@ -1646,7 +1646,19 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
             }
         }
 
-        if (i > 0) [output appendString:@"\n"];
+        if (i > 0) {
+            [output appendString:@"\n"];
+            // Add blank line before headings unless previous paragraph was already blank
+            if (style == 0 || style == 1) {
+                NSDictionary *prev = paragraphs[i - 1];
+                NSInteger prevStyle = [prev[@"style"] integerValue];
+                NSString *prevText = prev[@"text"];
+                BOOL prevWasBlank = (prevStyle == 3 && prevText.length == 0);
+                if (!prevWasBlank) {
+                    [output appendString:@"\n"];
+                }
+            }
+        }
         [output appendString:line];
     }
 
@@ -5066,17 +5078,38 @@ static int cmdTest(id viewContext) {
         }
 
         // 6. Compare paragraph by paragraph
+        // Filter out cosmetic blank paragraphs before headings (paraModelToMarkdown
+        // inserts blank lines before headings for proper markdown spacing; these
+        // become empty body paragraphs on round-trip but are visually identical)
+        NSArray *(^filterCosmeticBlanks)(NSArray *) = ^NSArray *(NSArray *paras) {
+            NSMutableArray *result = [NSMutableArray array];
+            for (NSUInteger fi = 0; fi < paras.count; fi++) {
+                NSDictionary *fp = paras[fi];
+                NSInteger fStyle = [fp[@"style"] integerValue];
+                NSString *fText = fp[@"text"];
+                // Skip empty body paragraphs that precede a heading
+                if (fStyle == 3 && fText.length == 0 && fi + 1 < paras.count) {
+                    NSInteger nextStyle = [paras[fi + 1][@"style"] integerValue];
+                    if (nextStyle == 0 || nextStyle == 1) continue;
+                }
+                [result addObject:fp];
+            }
+            return result;
+        };
+        NSArray *origForCmp = filterCosmeticBlanks(origFiltered);
+        NSArray *rtForCmp = filterCosmeticBlanks(rtNewFiltered);
+
         BOOL rtPass = YES;
         NSString *rtFailMsg = nil;
 
-        if (origFiltered.count != rtNewFiltered.count) {
+        if (origForCmp.count != rtForCmp.count) {
             rtPass = NO;
             rtFailMsg = [NSString stringWithFormat:@"paragraph count mismatch: orig=%lu rt=%lu",
-                (unsigned long)origFiltered.count, (unsigned long)rtNewFiltered.count];
+                (unsigned long)origForCmp.count, (unsigned long)rtForCmp.count];
         } else {
-            for (NSUInteger pi = 0; pi < origFiltered.count; pi++) {
-                NSDictionary *origP = origFiltered[pi];
-                NSDictionary *rtP = rtNewFiltered[pi];
+            for (NSUInteger pi = 0; pi < origForCmp.count; pi++) {
+                NSDictionary *origP = origForCmp[pi];
+                NSDictionary *rtP = rtForCmp[pi];
 
                 // Compare text (note-to-note links use U+FFFC in orig but display text in rt)
                 NSString *origText = origP[@"text"];
@@ -5235,17 +5268,38 @@ static int cmdTest(id viewContext) {
                 [rtGroupsFiltered addObject:g];
             }
 
+            // Filter out cosmetic blank groups before heading groups (same rationale
+            // as filterCosmeticBlanks above — markdown spacing adds empty paragraphs)
+            NSArray *(^filterCosmeticBlankGroups)(NSArray *) = ^NSArray *(NSArray *groups) {
+                NSMutableArray *result = [NSMutableArray array];
+                for (NSUInteger fi = 0; fi < groups.count; fi++) {
+                    NSArray *g = groups[fi];
+                    if (g.count == 0 && fi + 1 < groups.count) {
+                        NSArray *nextG = groups[fi + 1];
+                        NSInteger nextStyle = -1;
+                        for (NSDictionary *e in nextG) {
+                            if (e[@"style"]) { nextStyle = [e[@"style"] integerValue]; break; }
+                        }
+                        if (nextStyle == 0 || nextStyle == 1) continue;
+                    }
+                    [result addObject:g];
+                }
+                return result;
+            };
+            NSArray *origGroupsCmp = filterCosmeticBlankGroups(origGroupsFiltered);
+            NSArray *rtGroupsCmp = filterCosmeticBlankGroups(rtGroupsFiltered);
+
             BOOL attrPass = YES;
             NSString *attrFailMsg = nil;
 
-            if (origGroupsFiltered.count != rtGroupsFiltered.count) {
+            if (origGroupsCmp.count != rtGroupsCmp.count) {
                 attrPass = NO;
                 attrFailMsg = [NSString stringWithFormat:@"paragraph group count mismatch: orig=%lu rt=%lu",
-                    (unsigned long)origGroupsFiltered.count, (unsigned long)rtGroupsFiltered.count];
+                    (unsigned long)origGroupsCmp.count, (unsigned long)rtGroupsCmp.count];
             } else {
-                for (NSUInteger gi = 0; gi < origGroupsFiltered.count; gi++) {
-                    NSArray *origG = origGroupsFiltered[gi];
-                    NSArray *rtG = rtGroupsFiltered[gi];
+                for (NSUInteger gi = 0; gi < origGroupsCmp.count; gi++) {
+                    NSArray *origG = origGroupsCmp[gi];
+                    NSArray *rtG = rtGroupsCmp[gi];
 
                     // Compare each attribute range in the group
                     // Build summary for each group: style, indent, todoDone, hasLink, hasAttachment

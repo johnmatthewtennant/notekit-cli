@@ -1118,20 +1118,38 @@ static int cmdTest(id viewContext) {
     fprintf(stderr, "Test 13: cmdSearch...\\n");
     { int r = cmdSearch(viewContext, testTitle, testFolderName); if (r==0) { fprintf(stderr, "  PASS\\n"); passed++; } else { fprintf(stderr, "  FAIL\\n"); failed++; } }
 
-    // Test 14: Verify JSON shape from noteToDict
-    fprintf(stderr, "Test 14: JSON shape...\\n");
+    // Test 14: Verify JSON shape from noteToDict (all fields)
+    fprintf(stderr, "Test 14: JSON shape (all noteToDict fields)...\\n");
     {
         id note = findNote(viewContext, testTitle, testFolderName);
         NSDictionary *dict = noteToDict(note);
-        BOOL hasTitle = dict[@"title"] != nil;
-        BOOL hasFolder = dict[@"folder"] != nil;
-        BOOL hasId = dict[@"id"] != nil;
-        BOOL hasCreated = dict[@"createdAt"] != nil;
-        BOOL hasModified = dict[@"modifiedAt"] != nil;
-        BOOL hasChecklist = dict[@"hasChecklist"] != nil;
-        if (hasTitle && hasFolder && hasId && hasCreated && hasModified && hasChecklist) {
-            fprintf(stderr, "  PASS\\n"); passed++;
-        } else { fprintf(stderr, "  FAIL\\n"); failed++; }
+        NSArray *requiredKeys = @[@"title", @"body", @"folder", @"id", @"createdAt",
+                                   @"modifiedAt", @"hasChecklist", @"isPinned", @"hasTags",
+                                   @"snippet", @"url"];
+        NSMutableArray *missing = [NSMutableArray array];
+        for (NSString *key in requiredKeys) {
+            if (dict[key] == nil) [missing addObject:key];
+        }
+        if (missing.count == 0) {
+            // Also verify value types
+            BOOL typesOk = YES;
+            if (![dict[@"title"] isKindOfClass:[NSString class]]) typesOk = NO;
+            if (![dict[@"body"] isKindOfClass:[NSString class]]) typesOk = NO;
+            if (![dict[@"folder"] isKindOfClass:[NSString class]]) typesOk = NO;
+            if (![dict[@"id"] isKindOfClass:[NSString class]]) typesOk = NO;
+            if (![dict[@"createdAt"] isKindOfClass:[NSString class]]) typesOk = NO;
+            if (![dict[@"modifiedAt"] isKindOfClass:[NSString class]]) typesOk = NO;
+            if (![dict[@"hasChecklist"] isKindOfClass:[NSNumber class]]) typesOk = NO;
+            if (![dict[@"isPinned"] isKindOfClass:[NSNumber class]]) typesOk = NO;
+            if (![dict[@"hasTags"] isKindOfClass:[NSNumber class]]) typesOk = NO;
+            if (![dict[@"snippet"] isKindOfClass:[NSString class]]) typesOk = NO;
+            if (![dict[@"url"] isKindOfClass:[NSString class]]) typesOk = NO;
+            if (typesOk) {
+                fprintf(stderr, "  PASS (all %lu keys present, types correct)\\n", (unsigned long)requiredKeys.count); passed++;
+            } else { fprintf(stderr, "  FAIL (type mismatch)\\n"); failed++; }
+        } else {
+            fprintf(stderr, "  FAIL (missing keys: %s)\\n", [[missing componentsJoinedByString:@", "] UTF8String]); failed++;
+        }
     }
 
     // Test 16: cmdReadAttrs (call actual command)

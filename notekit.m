@@ -3112,20 +3112,38 @@ static int cmdTest(id viewContext) {
     fprintf(stderr, "Test 13: cmdSearch...\n");
     { int r = cmdSearch(viewContext, testTitle, testFolderName); if (r==0) { fprintf(stderr, "  PASS\n"); passed++; } else { fprintf(stderr, "  FAIL\n"); failed++; } }
 
-    // Test 14: Verify JSON shape from noteToDict
-    fprintf(stderr, "Test 14: JSON shape...\n");
+    // Test 14: Verify JSON shape from noteToDict (all fields)
+    fprintf(stderr, "Test 14: JSON shape (all noteToDict fields)...\n");
     {
         id note = findNote(viewContext, testTitle, testFolderName);
         NSDictionary *dict = noteToDict(note);
-        BOOL hasTitle = dict[@"title"] != nil;
-        BOOL hasFolder = dict[@"folder"] != nil;
-        BOOL hasId = dict[@"id"] != nil;
-        BOOL hasCreated = dict[@"createdAt"] != nil;
-        BOOL hasModified = dict[@"modifiedAt"] != nil;
-        BOOL hasChecklist = dict[@"hasChecklist"] != nil;
-        if (hasTitle && hasFolder && hasId && hasCreated && hasModified && hasChecklist) {
-            fprintf(stderr, "  PASS\n"); passed++;
-        } else { fprintf(stderr, "  FAIL\n"); failed++; }
+        NSArray *requiredKeys = @[@"title", @"body", @"folder", @"id", @"createdAt",
+                                   @"modifiedAt", @"hasChecklist", @"isPinned", @"hasTags",
+                                   @"snippet", @"url"];
+        NSMutableArray *missing = [NSMutableArray array];
+        for (NSString *key in requiredKeys) {
+            if (dict[key] == nil) [missing addObject:key];
+        }
+        if (missing.count == 0) {
+            // Also verify value types
+            BOOL typesOk = YES;
+            if (![dict[@"title"] isKindOfClass:[NSString class]]) typesOk = NO;
+            if (![dict[@"body"] isKindOfClass:[NSString class]]) typesOk = NO;
+            if (![dict[@"folder"] isKindOfClass:[NSString class]]) typesOk = NO;
+            if (![dict[@"id"] isKindOfClass:[NSString class]]) typesOk = NO;
+            if (![dict[@"createdAt"] isKindOfClass:[NSString class]]) typesOk = NO;
+            if (![dict[@"modifiedAt"] isKindOfClass:[NSString class]]) typesOk = NO;
+            if (![dict[@"hasChecklist"] isKindOfClass:[NSNumber class]]) typesOk = NO;
+            if (![dict[@"isPinned"] isKindOfClass:[NSNumber class]]) typesOk = NO;
+            if (![dict[@"hasTags"] isKindOfClass:[NSNumber class]]) typesOk = NO;
+            if (![dict[@"snippet"] isKindOfClass:[NSString class]]) typesOk = NO;
+            if (![dict[@"url"] isKindOfClass:[NSString class]]) typesOk = NO;
+            if (typesOk) {
+                fprintf(stderr, "  PASS (all %lu keys present, types correct)\n", (unsigned long)requiredKeys.count); passed++;
+            } else { fprintf(stderr, "  FAIL (type mismatch)\n"); failed++; }
+        } else {
+            fprintf(stderr, "  FAIL (missing keys: %s)\n", [[missing componentsJoinedByString:@", "] UTF8String]); failed++;
+        }
     }
 
     // Test 16: cmdReadAttrs (call actual command)
@@ -3144,13 +3162,247 @@ static int cmdTest(id viewContext) {
         else { fprintf(stderr, "  FAIL\n"); failed++; }
     }
 
-    // --- Note Linking Tests ---
+    // --- JSON Output Shape Tests (subprocess) ---
 
     char rawExePath[PATH_MAX];
     char exePath[PATH_MAX];
     uint32_t exeSize = sizeof(rawExePath);
     _NSGetExecutablePath(rawExePath, &exeSize);
     realpath(rawExePath, exePath);
+
+    // Test: cmdList JSON output shape (subprocess)
+    fprintf(stderr, "Test: cmdList JSON shape...\n");
+    {
+        NSString *cmd = [NSString stringWithFormat:@"'%s' list --folder '%@' 2>/dev/null", exePath, testFolderName];
+        FILE *fp = popen([cmd UTF8String], "r");
+        NSMutableData *outData = [NSMutableData data];
+        if (fp) {
+            char buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) [outData appendBytes:buf length:n];
+            pclose(fp);
+        }
+        NSArray *arr = [NSJSONSerialization JSONObjectWithData:outData options:0 error:nil];
+        if (arr && [arr isKindOfClass:[NSArray class]] && arr.count > 0) {
+            NSDictionary *first = arr[0];
+            NSArray *requiredKeys = @[@"title", @"body", @"folder", @"id", @"createdAt",
+                                       @"modifiedAt", @"hasChecklist", @"isPinned", @"hasTags",
+                                       @"snippet", @"url"];
+            NSMutableArray *missing = [NSMutableArray array];
+            for (NSString *key in requiredKeys) {
+                if (first[key] == nil) [missing addObject:key];
+            }
+            if (missing.count == 0) { fprintf(stderr, "  PASS (%lu notes, all keys present)\n", (unsigned long)arr.count); passed++; }
+            else { fprintf(stderr, "  FAIL (missing: %s)\n", [[missing componentsJoinedByString:@", "] UTF8String]); failed++; }
+        } else { fprintf(stderr, "  FAIL (not a JSON array or empty)\n"); failed++; }
+    }
+
+    // Test: cmdFolders JSON output shape (subprocess)
+    fprintf(stderr, "Test: cmdFolders JSON shape...\n");
+    {
+        NSString *cmd = [NSString stringWithFormat:@"'%s' folders 2>/dev/null", exePath];
+        FILE *fp = popen([cmd UTF8String], "r");
+        NSMutableData *outData = [NSMutableData data];
+        if (fp) {
+            char buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) [outData appendBytes:buf length:n];
+            pclose(fp);
+        }
+        NSArray *arr = [NSJSONSerialization JSONObjectWithData:outData options:0 error:nil];
+        if (arr && [arr isKindOfClass:[NSArray class]] && arr.count > 0) {
+            BOOL allHaveName = YES;
+            BOOL foundTestFolder = NO;
+            for (NSDictionary *entry in arr) {
+                if (![entry[@"name"] isKindOfClass:[NSString class]]) { allHaveName = NO; break; }
+                if ([entry[@"name"] isEqualToString:testFolderName]) foundTestFolder = YES;
+            }
+            if (allHaveName && foundTestFolder) { fprintf(stderr, "  PASS (%lu folders, test folder found)\n", (unsigned long)arr.count); passed++; }
+            else if (!allHaveName) { fprintf(stderr, "  FAIL (entries missing 'name' key)\n"); failed++; }
+            else { fprintf(stderr, "  FAIL (test folder not found in output)\n"); failed++; }
+        } else { fprintf(stderr, "  FAIL (not a JSON array or empty)\n"); failed++; }
+    }
+
+    // Test: cmdGet JSON output shape (subprocess)
+    fprintf(stderr, "Test: cmdGet JSON shape...\n");
+    {
+        id noteForGet = findNote(viewContext, testTitle, testFolderName);
+        NSString *getID = noteToDict(noteForGet)[@"id"];
+        NSString *cmd = [NSString stringWithFormat:@"'%s' get --id '%@' 2>/dev/null", exePath, getID];
+        FILE *fp = popen([cmd UTF8String], "r");
+        NSMutableData *outData = [NSMutableData data];
+        if (fp) {
+            char buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) [outData appendBytes:buf length:n];
+            pclose(fp);
+        }
+        NSDictionary *dict = [NSJSONSerialization JSONObjectWithData:outData options:0 error:nil];
+        if (dict && [dict isKindOfClass:[NSDictionary class]]) {
+            NSArray *requiredKeys = @[@"title", @"body", @"folder", @"id", @"createdAt",
+                                       @"modifiedAt", @"hasChecklist", @"isPinned", @"hasTags",
+                                       @"snippet", @"url"];
+            NSMutableArray *missing = [NSMutableArray array];
+            for (NSString *key in requiredKeys) {
+                if (dict[key] == nil) [missing addObject:key];
+            }
+            if (missing.count == 0) { fprintf(stderr, "  PASS\n"); passed++; }
+            else { fprintf(stderr, "  FAIL (missing: %s)\n", [[missing componentsJoinedByString:@", "] UTF8String]); failed++; }
+        } else { fprintf(stderr, "  FAIL (not a JSON object)\n"); failed++; }
+    }
+
+    // Test: cmdSearch JSON output shape (subprocess)
+    fprintf(stderr, "Test: cmdSearch JSON shape...\n");
+    {
+        NSString *cmd = [NSString stringWithFormat:@"'%s' search --query '%@' --folder '%@' 2>/dev/null",
+            exePath, testTitle, testFolderName];
+        FILE *fp = popen([cmd UTF8String], "r");
+        NSMutableData *outData = [NSMutableData data];
+        if (fp) {
+            char buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) [outData appendBytes:buf length:n];
+            pclose(fp);
+        }
+        NSArray *arr = [NSJSONSerialization JSONObjectWithData:outData options:0 error:nil];
+        if (arr && [arr isKindOfClass:[NSArray class]] && arr.count > 0) {
+            NSDictionary *first = arr[0];
+            NSArray *requiredKeys = @[@"title", @"body", @"folder", @"id", @"createdAt",
+                                       @"modifiedAt", @"hasChecklist", @"isPinned", @"hasTags",
+                                       @"snippet", @"url"];
+            NSMutableArray *missing = [NSMutableArray array];
+            for (NSString *key in requiredKeys) {
+                if (first[key] == nil) [missing addObject:key];
+            }
+            if (missing.count == 0) { fprintf(stderr, "  PASS\n"); passed++; }
+            else { fprintf(stderr, "  FAIL (missing: %s)\n", [[missing componentsJoinedByString:@", "] UTF8String]); failed++; }
+        } else { fprintf(stderr, "  FAIL (not a JSON array or empty)\n"); failed++; }
+    }
+
+    // Test: cmdReadStructured JSON shape verification (subprocess)
+    fprintf(stderr, "Test: cmdReadStructured JSON shape...\n");
+    {
+        id noteForRS = findNote(viewContext, testTitle, testFolderName);
+        NSString *rsID = noteToDict(noteForRS)[@"id"];
+        NSString *cmd = [NSString stringWithFormat:@"'%s' read-structured --id '%@' 2>/dev/null", exePath, rsID];
+        FILE *fp = popen([cmd UTF8String], "r");
+        NSMutableData *outData = [NSMutableData data];
+        if (fp) {
+            char buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) [outData appendBytes:buf length:n];
+            pclose(fp);
+        }
+        NSArray *arr = [NSJSONSerialization JSONObjectWithData:outData options:0 error:nil];
+        if (arr && [arr isKindOfClass:[NSArray class]] && arr.count >= 3) {
+            // Verify title paragraph (style 0)
+            NSDictionary *titlePara = arr[0];
+            BOOL titleOk = [titlePara[@"text"] isKindOfClass:[NSString class]] &&
+                            [titlePara[@"style"] isKindOfClass:[NSNumber class]] &&
+                            [titlePara[@"style"] intValue] == 0;
+            // Verify body paragraph (style 3)
+            NSDictionary *bodyPara = arr[1];
+            BOOL bodyOk = [bodyPara[@"text"] isKindOfClass:[NSString class]] &&
+                           [bodyPara[@"style"] isKindOfClass:[NSNumber class]] &&
+                           [bodyPara[@"style"] intValue] == 3;
+            // Verify checklist paragraph (style 103, has type + checked)
+            NSDictionary *clPara = arr[2];
+            BOOL clOk = [clPara[@"text"] isKindOfClass:[NSString class]] &&
+                         [clPara[@"style"] isKindOfClass:[NSNumber class]] &&
+                         [clPara[@"style"] intValue] == 103 &&
+                         [clPara[@"type"] isEqualToString:@"checklist"] &&
+                         clPara[@"checked"] != nil;
+            if (titleOk && bodyOk && clOk) {
+                fprintf(stderr, "  PASS (title/body/checklist shapes correct)\n"); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (title=%d body=%d checklist=%d)\n", titleOk, bodyOk, clOk); failed++;
+            }
+        } else { fprintf(stderr, "  FAIL (not a JSON array or < 3 paragraphs)\n"); failed++; }
+    }
+
+    // Test: cmdReadAttrs JSON shape (subprocess)
+    fprintf(stderr, "Test: cmdReadAttrs JSON shape...\n");
+    {
+        id noteForRA = findNote(viewContext, testTitle, testFolderName);
+        NSString *raID = noteToDict(noteForRA)[@"id"];
+        NSString *cmd = [NSString stringWithFormat:@"'%s' read-attrs --id '%@' 2>/dev/null", exePath, raID];
+        FILE *fp = popen([cmd UTF8String], "r");
+        NSMutableData *outData = [NSMutableData data];
+        if (fp) {
+            char buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) [outData appendBytes:buf length:n];
+            pclose(fp);
+        }
+        NSArray *arr = [NSJSONSerialization JSONObjectWithData:outData options:0 error:nil];
+        if (arr && [arr isKindOfClass:[NSArray class]] && arr.count > 0) {
+            NSDictionary *first = arr[0];
+            // read-attrs entries must have: text, offset, length, style
+            BOOL hasText = [first[@"text"] isKindOfClass:[NSString class]];
+            BOOL hasOffset = [first[@"offset"] isKindOfClass:[NSNumber class]];
+            BOOL hasLength = [first[@"length"] isKindOfClass:[NSNumber class]];
+            BOOL hasStyle = [first[@"style"] isKindOfClass:[NSNumber class]];
+            if (hasText && hasOffset && hasLength && hasStyle) {
+                fprintf(stderr, "  PASS (%lu ranges)\n", (unsigned long)arr.count); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (text=%d offset=%d length=%d style=%d)\n",
+                    hasText, hasOffset, hasLength, hasStyle); failed++;
+            }
+        } else { fprintf(stderr, "  FAIL (not a JSON array or empty)\n"); failed++; }
+    }
+
+    // --- Error Path Tests (subprocess) ---
+
+    // Test: Error - get non-existent note
+    fprintf(stderr, "Test: Error - get non-existent note...\n");
+    {
+        NSString *cmd = [NSString stringWithFormat:@"'%s' get --title '__nonexistent_note_999__' --folder '%@' 2>/dev/null", exePath, testFolderName];
+        int ret = system([cmd UTF8String]);
+        if (ret != 0) { fprintf(stderr, "  PASS (exit code %d)\n", WEXITSTATUS(ret)); passed++; }
+        else { fprintf(stderr, "  FAIL (should have failed)\n"); failed++; }
+    }
+
+    // Test: Error - append to non-existent note
+    fprintf(stderr, "Test: Error - append to non-existent note...\n");
+    {
+        NSString *cmd = [NSString stringWithFormat:@"'%s' append --id 'NONEXISTENT_ID_999' --text 'hello' 2>/dev/null", exePath];
+        int ret = system([cmd UTF8String]);
+        if (ret != 0) { fprintf(stderr, "  PASS (exit code %d)\n", WEXITSTATUS(ret)); passed++; }
+        else { fprintf(stderr, "  FAIL (should have failed)\n"); failed++; }
+    }
+
+    // Test: Error - replace non-existent text
+    fprintf(stderr, "Test: Error - replace non-existent text...\n");
+    {
+        id noteForErr = findNote(viewContext, testTitle, testFolderName);
+        NSString *errID = noteToDict(noteForErr)[@"id"];
+        NSString *cmd = [NSString stringWithFormat:@"'%s' replace --id '%@' --search '__text_that_does_not_exist__' --replacement 'new' 2>/dev/null", exePath, errID];
+        int ret = system([cmd UTF8String]);
+        if (ret != 0) { fprintf(stderr, "  PASS (exit code %d)\n", WEXITSTATUS(ret)); passed++; }
+        else { fprintf(stderr, "  FAIL (should have failed)\n"); failed++; }
+    }
+
+    // Test: Error - delete-range with offset beyond note length
+    fprintf(stderr, "Test: Error - delete-range out of bounds...\n");
+    {
+        id noteForErr2 = findNote(viewContext, testTitle, testFolderName);
+        NSString *errID2 = noteToDict(noteForErr2)[@"id"];
+        NSString *cmd = [NSString stringWithFormat:@"'%s' delete-range --id '%@' --start 99999 --length 10 2>/dev/null", exePath, errID2];
+        int ret = system([cmd UTF8String]);
+        if (ret != 0) { fprintf(stderr, "  PASS (exit code %d)\n", WEXITSTATUS(ret)); passed++; }
+        else { fprintf(stderr, "  FAIL (should have failed)\n"); failed++; }
+    }
+
+    // Test: Error - read non-existent note
+    fprintf(stderr, "Test: Error - read non-existent note...\n");
+    {
+        NSString *cmd = [NSString stringWithFormat:@"'%s' read --title '__nonexistent_note_999__' --folder '%@' 2>/dev/null", exePath, testFolderName];
+        int ret = system([cmd UTF8String]);
+        if (ret != 0) { fprintf(stderr, "  PASS (exit code %d)\n", WEXITSTATUS(ret)); passed++; }
+        else { fprintf(stderr, "  FAIL (should have failed)\n"); failed++; }
+    }
+
+    // --- Note Linking Tests ---
 
     // Test: get-link
     fprintf(stderr, "Test: get-link...\n");

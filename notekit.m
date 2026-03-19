@@ -2794,6 +2794,7 @@ static int cmdTest(id viewContext) {
                 if ([fname isEqualToString:testFolderName] ||
                     [fname isEqualToString:@"__notes_cli_test_folder_2__"]) {
                     ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), f);
+                    [viewContext deleteObject:f];
                     [viewContext save:nil];
                     cleanedCount++;
                     found = YES;
@@ -3097,6 +3098,7 @@ static int cmdTest(id viewContext) {
 
         // Cleanup second folder
         ((void (*)(id, SEL, id))objc_msgSend)(ICFolder2, sel_registerName("deleteFolder:"), tf2);
+        [viewContext deleteObject:tf2];
         [viewContext save:nil];
     }
 
@@ -5851,20 +5853,19 @@ static int cmdTest(id viewContext) {
         }
         if (tf) {
             ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), tf);
+            [viewContext deleteObject:tf];
             [viewContext save:nil];
-            // Verify both test folders are gone
+            // Verify test folder is gone from Core Data context
             BOOL foundTestFolder = NO;
             for (id f in fetchFolders(viewContext)) {
                 NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
-                if ([fname isEqualToString:testFolderName] ||
-                    [fname isEqualToString:@"__notes_cli_test_folder_2__"]) {
+                if ([fname isEqualToString:testFolderName]) {
                     foundTestFolder = YES; break;
                 }
             }
             if (!foundTestFolder) { fprintf(stderr, "  PASS\n"); passed++; }
             else {
-                // Context cache may be stale; trust deleteFolder works
-                fprintf(stderr, "  PASS (delete issued, verified on next run)\n"); passed++;
+                fprintf(stderr, "  FAIL (test folder still found after deletion)\n"); failed++;
             }
         } else { fprintf(stderr, "  FAIL (folder not found to delete)\n"); failed++; }
     }

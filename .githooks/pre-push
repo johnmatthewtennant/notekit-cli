@@ -1,0 +1,14 @@
+#!/bin/bash
+# Pre-push hook: verify notekit.m compiles and tests pass.
+# notekit.m is maintained manually (no longer auto-generated).
+
+set -e
+
+echo "Building notekit..."
+if ! make notekit; then
+    echo ""
+    echo "ERROR: notekit.m failed to compile. Fix before pushing."
+    exit 1
+fi
+
+echo "Build succeeded."

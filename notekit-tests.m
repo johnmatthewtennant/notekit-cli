@@ -1924,6 +1924,48 @@ static int cmdTest(id viewContext) {
         } else { fprintf(stderr, "  FAIL (not found)\n"); failed++; }
     }
 
+    // Test: set-attr --strikethrough
+    fprintf(stderr, "Test: set-attr --strikethrough...\n");
+    {
+        id note = findNote(viewContext, testTitle, testFolderName);
+        if (note) {
+            NSString *noteID = noteToDict(note)[@"id"];
+            NSUInteger bodyOff = bodyOffsetForNote(note);
+            // Apply strikethrough
+            NSDictionary *attrOpts = @{@"strikethrough": @"true", @"body-offset": @"true"};
+            int ret = cmdSetAttr(viewContext, noteID, 0, 5, attrOpts);
+            if (ret == 0) {
+                note = findNoteByID(viewContext, noteID);
+                id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+                id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+                NSRange effectiveRange;
+                NSDictionary *attrs = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(ms, sel_registerName("attributesAtIndex:effectiveRange:"), bodyOff, &effectiveRange);
+                id strike = attrs[@"TTStrikethrough"];
+                if (strike && [strike integerValue] == 1) {
+                    fprintf(stderr, "  PASS\n"); passed++;
+                } else {
+                    fprintf(stderr, "  FAIL (TTStrikethrough not set)\n"); failed++;
+                }
+            } else { fprintf(stderr, "  FAIL (ret=%d)\n", ret); failed++; }
+            // Remove strikethrough
+            NSDictionary *removeOpts = @{@"strikethrough": @"false", @"body-offset": @"true"};
+            ret = cmdSetAttr(viewContext, noteID, 0, 5, removeOpts);
+            if (ret == 0) {
+                note = findNoteByID(viewContext, noteID);
+                id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+                id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+                NSRange effectiveRange;
+                NSDictionary *attrs = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(ms, sel_registerName("attributesAtIndex:effectiveRange:"), bodyOff, &effectiveRange);
+                id strike = attrs[@"TTStrikethrough"];
+                if (!strike) {
+                    fprintf(stderr, "  PASS (remove)\n"); passed++;
+                } else {
+                    fprintf(stderr, "  FAIL (TTStrikethrough still present)\n"); failed++;
+                }
+            } else { fprintf(stderr, "  FAIL remove (ret=%d)\n", ret); failed++; }
+        } else { fprintf(stderr, "  FAIL (not found)\n"); failed++; }
+    }
+
     // Test: insert with --body-offset
     fprintf(stderr, "Test: insert with --body-offset...\n");
     {

@@ -441,8 +441,10 @@ static int cmdDeleteFolder(id viewContext, NSString *name) {
     }
     if (!targetFolder) errorExit([NSString stringWithFormat:@"Folder not found: %@", name]);
 
-    Class ICFolder = NSClassFromString(@"ICFolder");
-    ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), targetFolder);
+    // markForDeletion soft-deletes (moves to Recently Deleted) without
+    // triggering aggressive CloudKit sync that can corrupt shared folder state.
+    ((void (*)(id, SEL))objc_msgSend)(targetFolder, sel_registerName("markForDeletion"));
+    [viewContext deleteObject:targetFolder];
 
     NSError *error = nil;
     [viewContext save:&error];

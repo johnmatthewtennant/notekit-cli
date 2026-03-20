@@ -18,7 +18,6 @@ Command-line interface for Apple Notes. Built on the private NotesShared framewo
 - `notekit append --id <id> --text "item" --style 102` — append a numbered list item
 - `notekit append --id <id> --text "item" --style 103` — append a checklist item
 - `notekit search --query "query"` — search notes
-- `notekit replace --id <id> --search "old" --replacement "new" [--case-insensitive]` — replace text
 - `notekit search-offset --id <id> --text "text" [--case-insensitive]` — find text offset in note
 
 ## Styles

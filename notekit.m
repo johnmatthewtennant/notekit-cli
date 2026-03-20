@@ -250,8 +250,7 @@ int main(int argc, const char *argv[]) {
             NSString *noteID = opts[@"id"];
             if (!noteID || noteID.length == 0) { fprintf(stderr, "Error: --id required\n"); usage(); return 1; }
             if (!opts[@"search"] || !opts[@"replacement"]) { fprintf(stderr, "Error: --search and --replacement required\n"); usage(); return 1; }
-            BOOL caseInsensitive = [opts[@"case-insensitive"] isEqualToString:@"true"];
-            return cmdReplace(viewContext, noteID, opts[@"search"], opts[@"replacement"], caseInsensitive);
+            return cmdReplace(viewContext, noteID, opts[@"search"], opts[@"replacement"]);
 
         } else if ([command isEqualToString:@"delete-line"]) {
             NSString *noteID = opts[@"id"];

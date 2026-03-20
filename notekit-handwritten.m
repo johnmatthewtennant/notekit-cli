@@ -205,8 +205,7 @@ static int cmdSearchOffset(id viewContext, NSString *identifier, NSString *searc
     return 0;
 }
 
-static int cmdReplace(id viewContext, NSString *identifier, NSString *search, NSString *replacement, BOOL caseInsensitive) {
-    if (search.length == 0) errorExit(@"--search must not be empty");
+static int cmdReplace(id viewContext, NSString *identifier, NSString *search, NSString *replacement) {
     id note = findNoteByID(viewContext, identifier);
     if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", identifier]);
 
@@ -215,8 +214,7 @@ static int cmdReplace(id viewContext, NSString *identifier, NSString *search, NS
     NSAttributedString *attrStr = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attributedString"));
     NSString *fullText = [attrStr string];
 
-    NSStringCompareOptions options = caseInsensitive ? NSCaseInsensitiveSearch : 0;
-    NSRange found = [fullText rangeOfString:search options:options];
+    NSRange found = [fullText rangeOfString:search];
     if (found.location == NSNotFound) errorExit([NSString stringWithFormat:@"Text not found: %@", search]);
 
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("beginEditing"));
@@ -228,8 +226,8 @@ static int cmdReplace(id viewContext, NSString *identifier, NSString *search, NS
     ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
         @{@"TTStyle": bodyStyle}, NSMakeRange(found.location, replacement.length));
 
-    NSUInteger newLen = fullText.length - found.length + replacement.length;
-    NSInteger delta = (NSInteger)replacement.length - (NSInteger)found.length;
+    NSUInteger newLen = fullText.length - search.length + replacement.length;
+    NSInteger delta = (NSInteger)replacement.length - (NSInteger)search.length;
     saveNote(note, viewContext, newLen, delta);
     printJSON(@{@"id": identifier, @"replaced": search, @"with": replacement});
     return 0;
@@ -2021,7 +2019,7 @@ static void usage(void) {
     fprintf(stderr, "  can be accomplished with the primitive commands above.\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "  notekit search-offset --id <id> --text <text> [--case-insensitive]\n");
-    fprintf(stderr, "  notekit replace --id <id> --search <text> --replacement <text> [--case-insensitive]\n");
+    fprintf(stderr, "  notekit replace --id <id> --search <text> --replacement <text>\n");
     fprintf(stderr, "  notekit read-structured (--title <title> | --id <id>) [--folder <name>]\n");
     fprintf(stderr, "  notekit read-markdown (--title <title> | --id <id>) [--folder <name>]\n");
     fprintf(stderr, "  notekit write-markdown --id <id> [--dry-run] [--backup]            Read markdown from stdin, diff-update note\n");

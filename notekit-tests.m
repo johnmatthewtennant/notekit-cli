@@ -256,7 +256,7 @@ static int cmdTest(id viewContext) {
     {
         id noteForID7 = findNote(viewContext, testTitle, testFolderName);
         NSString *noteID7 = noteToDict(noteForID7)[@"id"];
-        int ret = cmdReplace(viewContext, noteID7, @"Test body", @"Modified body", NO);
+        int ret = cmdReplace(viewContext, noteID7, @"Test body", @"Modified body");
         if (ret == 0) {
             id note = findNote(viewContext, testTitle, testFolderName);
             NSString *body = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("noteAsPlainTextWithoutTitle"));
@@ -3940,23 +3940,6 @@ static int cmdTest(id viewContext) {
             RUN_EXPECT_FAIL(errCmd, errOk, @"Text not found");
             if (errOk) { fprintf(stderr, "  PASS\n"); passed++; }
             else { fprintf(stderr, "  FAIL (expected exit=1 with 'Text not found')\n"); failed++; }
-        } else { fprintf(stderr, "  FAIL (note not found)\n"); failed++; }
-    }
-
-    // Test: replace --case-insensitive
-    fprintf(stderr, "Test: replace --case-insensitive...\n");
-    {
-        id noteForCI = findNote(viewContext, testTitle, testFolderName);
-        if (noteForCI) {
-            NSString *ciReplId = noteToDict(noteForCI)[@"id"];
-            int ret = cmdReplace(viewContext, ciReplId, @"MODIFIED BODY", @"Case replaced", YES);
-            if (ret == 0) {
-                id noteAfter = findNote(viewContext, testTitle, testFolderName);
-                NSString *body = ((id (*)(id, SEL))objc_msgSend)(noteAfter, sel_registerName("noteAsPlainTextWithoutTitle"));
-                if ([body containsString:@"Case replaced"] && ![body containsString:@"Modified body"]) {
-                    fprintf(stderr, "  PASS\n"); passed++;
-                } else { fprintf(stderr, "  FAIL (body: %s)\n", [body UTF8String]); failed++; }
-            } else { fprintf(stderr, "  FAIL (cmdReplace returned %d)\n", ret); failed++; }
         } else { fprintf(stderr, "  FAIL (note not found)\n"); failed++; }
     }
 

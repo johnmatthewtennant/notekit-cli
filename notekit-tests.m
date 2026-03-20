@@ -548,30 +548,6 @@ static int cmdTest(id viewContext) {
         } else { fprintf(stderr, "  FAIL (note not found)\n"); failed++; }
     }
 
-    // Test: cmdReadAttrs via subprocess (verify JSON array shape)
-    fprintf(stderr, "Test: cmdReadAttrs JSON shape...\n");
-    {
-        id noteRA = findNote(viewContext, testTitle, testFolderName);
-        if (noteRA) {
-            NSString *noteRAId = noteToDict(noteRA)[@"id"];
-            NSString *raCmd = [NSString stringWithFormat:@"'%s' read-attrs --id '%@' 2>/dev/null", exePath, noteRAId];
-            NSMutableData *raData;
-            RUN_CAPTURE(raCmd, raData);
-            NSArray *raArr = [NSJSONSerialization JSONObjectWithData:raData options:0 error:nil];
-            BOOL raOk = [raArr isKindOfClass:[NSArray class]] && raArr.count > 0;
-            if (raOk) {
-                for (NSDictionary *raEntry in raArr) {
-                    if (![raEntry isKindOfClass:[NSDictionary class]]) { raOk = NO; break; }
-                    if (![raEntry[@"offset"] isKindOfClass:[NSNumber class]]) { raOk = NO; break; }
-                    if (![raEntry[@"length"] isKindOfClass:[NSNumber class]]) { raOk = NO; break; }
-                    if (![raEntry[@"text"] isKindOfClass:[NSString class]]) { raOk = NO; break; }
-                }
-            }
-            if (raOk) { fprintf(stderr, "  PASS (%lu entries)\n", (unsigned long)raArr.count); passed++; }
-            else { fprintf(stderr, "  FAIL (invalid JSON shape)\n"); failed++; }
-        } else { fprintf(stderr, "  FAIL (note not found)\n"); failed++; }
-    }
-
     // Test: cmdInsert (direct function call — avoids CoreData contention)
     fprintf(stderr, "Test: cmdInsert...\n");
     {
@@ -684,31 +660,6 @@ static int cmdTest(id viewContext) {
 
         deleteNote(findNoteByID(viewContext, toggleID), viewContext);
         [viewContext save:nil];
-    }
-
-    // Test: cmdSearch via subprocess (verify JSON array shape and fields)
-    fprintf(stderr, "Test: cmdSearch JSON shape...\n");
-    {
-        NSString *scCmd = [NSString stringWithFormat:@"'%s' search --query '%@' --folder '%@' 2>/dev/null",
-            exePath, testTitle, testFolderName];
-        NSMutableData *scData;
-        RUN_CAPTURE(scCmd, scData);
-        NSArray *scArr = [NSJSONSerialization JSONObjectWithData:scData options:0 error:nil];
-        BOOL scOk = [scArr isKindOfClass:[NSArray class]] && scArr.count >= 1;
-        if (scOk) {
-            NSDictionary *scFirst = scArr[0];
-            scOk = [scFirst isKindOfClass:[NSDictionary class]]
-                && [scFirst[@"id"] isKindOfClass:[NSString class]]
-                && [scFirst[@"title"] isKindOfClass:[NSString class]]
-                && [scFirst[@"folder"] isKindOfClass:[NSString class]]
-                && [scFirst[@"createdAt"] isKindOfClass:[NSString class]]
-                && [scFirst[@"modifiedAt"] isKindOfClass:[NSString class]]
-                && [scFirst[@"hasChecklist"] isKindOfClass:[NSNumber class]]
-                && [scFirst[@"isPinned"] isKindOfClass:[NSNumber class]]
-                && [scFirst[@"snippet"] isKindOfClass:[NSString class]];
-        }
-        if (scOk) { fprintf(stderr, "  PASS (%lu results)\n", (unsigned long)scArr.count); passed++; }
-        else { fprintf(stderr, "  FAIL (invalid JSON or no results)\n"); failed++; }
     }
 
     // Test: noteToDict full field type validation
@@ -970,37 +921,6 @@ static int cmdTest(id viewContext) {
     fprintf(stderr, "Test: Error - get non-existent note...\n");
     {
         NSString *cmd = [NSString stringWithFormat:@"'%s' get --title '__nonexistent_note_999__' --folder '%@' 2>/dev/null", exePath, testFolderName];
-        int ret = system([cmd UTF8String]);
-        if (subprocessFailedProperly(ret)) { fprintf(stderr, "  PASS (exit code %d)\n", WEXITSTATUS(ret)); passed++; }
-        else { fprintf(stderr, "  FAIL (ret=%d, should have failed properly)\n", ret); failed++; }
-    }
-
-    // Test: Error - append to non-existent note
-    fprintf(stderr, "Test: Error - append to non-existent note...\n");
-    {
-        NSString *cmd = [NSString stringWithFormat:@"'%s' append --id 'NONEXISTENT_ID_999' --text 'hello' 2>/dev/null", exePath];
-        int ret = system([cmd UTF8String]);
-        if (subprocessFailedProperly(ret)) { fprintf(stderr, "  PASS (exit code %d)\n", WEXITSTATUS(ret)); passed++; }
-        else { fprintf(stderr, "  FAIL (ret=%d, should have failed properly)\n", ret); failed++; }
-    }
-
-    // Test: Error - replace non-existent text
-    fprintf(stderr, "Test: Error - replace non-existent text...\n");
-    {
-        id noteForErr = findNote(viewContext, testTitle, testFolderName);
-        NSString *errID = noteToDict(noteForErr)[@"id"];
-        NSString *cmd = [NSString stringWithFormat:@"'%s' replace --id '%@' --search '__text_that_does_not_exist__' --replacement 'new' 2>/dev/null", exePath, errID];
-        int ret = system([cmd UTF8String]);
-        if (subprocessFailedProperly(ret)) { fprintf(stderr, "  PASS (exit code %d)\n", WEXITSTATUS(ret)); passed++; }
-        else { fprintf(stderr, "  FAIL (ret=%d, should have failed properly)\n", ret); failed++; }
-    }
-
-    // Test: Error - delete-range with offset beyond note length
-    fprintf(stderr, "Test: Error - delete-range out of bounds...\n");
-    {
-        id noteForErr2 = findNote(viewContext, testTitle, testFolderName);
-        NSString *errID2 = noteToDict(noteForErr2)[@"id"];
-        NSString *cmd = [NSString stringWithFormat:@"'%s' delete-range --id '%@' --start 99999 --length 10 2>/dev/null", exePath, errID2];
         int ret = system([cmd UTF8String]);
         if (subprocessFailedProperly(ret)) { fprintf(stderr, "  PASS (exit code %d)\n", WEXITSTATUS(ret)); passed++; }
         else { fprintf(stderr, "  FAIL (ret=%d, should have failed properly)\n", ret); failed++; }

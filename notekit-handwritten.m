@@ -181,6 +181,7 @@ static int cmdDeleteRange(id viewContext, NSString *identifier, NSUInteger start
 }
 
 static int cmdSearchOffset(id viewContext, NSString *identifier, NSString *searchText, BOOL caseInsensitive) {
+    if (searchText.length == 0) errorExit(@"--text must not be empty");
     id note = findNoteByID(viewContext, identifier);
     if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", identifier]);
 
@@ -205,6 +206,7 @@ static int cmdSearchOffset(id viewContext, NSString *identifier, NSString *searc
 }
 
 static int cmdReplace(id viewContext, NSString *identifier, NSString *search, NSString *replacement, BOOL caseInsensitive) {
+    if (search.length == 0) errorExit(@"--search must not be empty");
     id note = findNoteByID(viewContext, identifier);
     if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", identifier]);
 
@@ -226,8 +228,8 @@ static int cmdReplace(id viewContext, NSString *identifier, NSString *search, NS
     ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
         @{@"TTStyle": bodyStyle}, NSMakeRange(found.location, replacement.length));
 
-    NSUInteger newLen = fullText.length - search.length + replacement.length;
-    NSInteger delta = (NSInteger)replacement.length - (NSInteger)search.length;
+    NSUInteger newLen = fullText.length - found.length + replacement.length;
+    NSInteger delta = (NSInteger)replacement.length - (NSInteger)found.length;
     saveNote(note, viewContext, newLen, delta);
     printJSON(@{@"id": identifier, @"replaced": search, @"with": replacement});
     return 0;

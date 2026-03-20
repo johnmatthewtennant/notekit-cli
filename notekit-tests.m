@@ -1966,6 +1966,21 @@ static int cmdTest(id viewContext) {
         } else { fprintf(stderr, "  FAIL (not found)\n"); failed++; }
     }
 
+    // Test: set-attr --strikethrough invalid value (subprocess)
+    fprintf(stderr, "Test: set-attr --strikethrough invalid value...\n");
+    {
+        id note = findNote(viewContext, testTitle, testFolderName);
+        if (note) {
+            NSString *noteID = noteToDict(note)[@"id"];
+            NSString *cmd = [NSString stringWithFormat:
+                @"'%s' set-attr --id '%@' --offset 0 --length 5 --strikethrough yes", exePath, noteID];
+            BOOL exitOk = NO;
+            RUN_EXPECT_FAIL(cmd, exitOk, @"--strikethrough must be");
+            if (exitOk) { fprintf(stderr, "  PASS\n"); passed++; }
+            else { fprintf(stderr, "  FAIL (expected error for invalid value)\n"); failed++; }
+        } else { fprintf(stderr, "  FAIL (not found)\n"); failed++; }
+    }
+
     // Test: insert with --body-offset
     fprintf(stderr, "Test: insert with --body-offset...\n");
     {

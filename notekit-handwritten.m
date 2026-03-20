@@ -2143,9 +2143,6 @@ static void usage(void) {
     fprintf(stderr, "\n");
     fprintf(stderr, "Testing:\n");
     fprintf(stderr, "  notekit test\n");
-    fprintf(stderr, "\n");
-    fprintf(stderr, "Report issues:\n");
-    fprintf(stderr, "  gh api repos/johnmatthewtennant/notekit-cli/issues --method POST -f title=\"...\" -f body=\"...\"\n");
 }
 
 

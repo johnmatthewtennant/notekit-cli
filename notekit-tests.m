@@ -108,7 +108,8 @@ static int cmdTest(id viewContext) {
                 NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
                 if ([fname isEqualToString:testFolderName] ||
                     [fname isEqualToString:@"__notes_cli_test_folder_2__"] ||
-                    [fname isEqualToString:testSubfolderName]) {
+                    [fname isEqualToString:testSubfolderName] ||
+                    [fname isEqualToString:@"__nested_sub_test__"]) {
                     // markForDeletion soft-deletes (moves to Recently Deleted) without
                     // triggering CloudKit sync deletion. deleteObject removes from Core Data
                     // context so re-fetch won't return it. activeFolderPredicate filters out

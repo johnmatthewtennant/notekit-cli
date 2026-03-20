@@ -107,13 +107,16 @@ static int cmdTest(id viewContext) {
                 NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
                 if ([fname isEqualToString:testFolderName] ||
                     [fname isEqualToString:@"__notes_cli_test_folder_2__"]) {
-                    // deleteFolder: marks for CloudKit sync deletion (app layer).
-                    // deleteObject: removes from Core Data context so re-fetch won't return it.
-                    // Both are needed: deleteFolder: alone leaves stale context; deleteObject: alone skips sync.
+                    // markForDeletion soft-deletes (moves to Recently Deleted) without
+                    // triggering CloudKit sync deletion. deleteObject removes from Core Data
+                    // context so re-fetch won't return it. activeFolderPredicate filters out
+                    // markedForDeletion folders, so they won't appear in subsequent queries.
+                    // We avoid deleteFolder: because it triggers CloudKit sync operations
+                    // that can interfere with iCloud shared folder state.
                     @try {
-                        ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), f);
+                        ((void (*)(id, SEL))objc_msgSend)(f, sel_registerName("markForDeletion"));
                     } @catch (id e) {
-                        fprintf(stderr, "Warning: deleteFolder: threw exception during cleanup\n");
+                        fprintf(stderr, "Warning: markForDeletion threw exception during cleanup\n");
                     }
                     [viewContext deleteObject:f];
                     NSError *saveErr = nil;
@@ -423,11 +426,11 @@ static int cmdTest(id viewContext) {
             } else { fprintf(stderr, "  FAIL (not in target folder)\n"); failed++; }
         } else { fprintf(stderr, "  FAIL\n"); failed++; }
 
-        // Cleanup second folder (deleteFolder: for sync, deleteObject: for context)
+        // Cleanup second folder (markForDeletion + deleteObject, no CloudKit sync)
         @try {
-            ((void (*)(id, SEL, id))objc_msgSend)(ICFolder2, sel_registerName("deleteFolder:"), tf2);
+            ((void (*)(id, SEL))objc_msgSend)(tf2, sel_registerName("markForDeletion"));
         } @catch (id e) {
-            fprintf(stderr, "  Warning: deleteFolder: threw exception cleaning up folder_2\n");
+            fprintf(stderr, "  Warning: markForDeletion threw exception cleaning up folder_2\n");
         }
         [viewContext deleteObject:tf2];
         NSError *saveErr11 = nil;
@@ -3930,12 +3933,11 @@ static int cmdTest(id viewContext) {
             if ([fname isEqualToString:testFolderName]) { tf = f; break; }
         }
         if (tf) {
-            // deleteFolder: marks for CloudKit sync deletion (app layer).
-            // deleteObject: removes from Core Data context so re-fetch won't return it.
+            // markForDeletion + deleteObject (no CloudKit sync, safe for shared folders)
             @try {
-                ((void (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("deleteFolder:"), tf);
+                ((void (*)(id, SEL))objc_msgSend)(tf, sel_registerName("markForDeletion"));
             } @catch (id e) {
-                fprintf(stderr, "  Warning: deleteFolder: threw exception\n");
+                fprintf(stderr, "  Warning: markForDeletion threw exception\n");
             }
             [viewContext deleteObject:tf];
             NSError *saveErr = nil;

@@ -41,6 +41,7 @@ Primitives:
   notekit get-link --id <id>
 
 Convenience (composed from primitives):
+  notekit search-offset --id <id> --text <text> [--case-insensitive]
   notekit replace --id <id> --search <text> --replacement <text>
   notekit read-structured (--title <title> | --id <id>) [--folder <name>]
   notekit read-markdown (--title <title> | --id <id>) [--folder <name>]

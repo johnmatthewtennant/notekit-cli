@@ -36,7 +36,8 @@ int main(int argc, const char *argv[]) {
                     [flag isEqualToString:@"force"] ||
                     [flag isEqualToString:@"body-offset"] ||
                     [flag isEqualToString:@"dry-run"] ||
-                    [flag isEqualToString:@"backup"]) {
+                    [flag isEqualToString:@"backup"] ||
+                    [flag isEqualToString:@"case-insensitive"]) {
                     opts[flag] = @"true";
                 } else if (i + 1 < argc) {
                     opts[flag] = [NSString stringWithUTF8String:argv[++i]];
@@ -238,11 +239,19 @@ int main(int argc, const char *argv[]) {
             return cmdDeleteRange(viewContext, noteID, [opts[@"start"] integerValue], [opts[@"length"] integerValue],
                 [opts[@"body-offset"] isEqualToString:@"true"]);
 
+        } else if ([command isEqualToString:@"search-offset"]) {
+            NSString *noteID = opts[@"id"];
+            if (!noteID || noteID.length == 0) { fprintf(stderr, "Error: --id required\n"); usage(); return 1; }
+            if (!kwText) { fprintf(stderr, "Error: --text required\n"); usage(); return 1; }
+            BOOL caseInsensitive = [opts[@"case-insensitive"] isEqualToString:@"true"];
+            return cmdSearchOffset(viewContext, noteID, kwText, caseInsensitive);
+
         } else if ([command isEqualToString:@"replace"]) {
             NSString *noteID = opts[@"id"];
             if (!noteID || noteID.length == 0) { fprintf(stderr, "Error: --id required\n"); usage(); return 1; }
             if (!opts[@"search"] || !opts[@"replacement"]) { fprintf(stderr, "Error: --search and --replacement required\n"); usage(); return 1; }
-            return cmdReplace(viewContext, noteID, opts[@"search"], opts[@"replacement"]);
+            BOOL caseInsensitive = [opts[@"case-insensitive"] isEqualToString:@"true"];
+            return cmdReplace(viewContext, noteID, opts[@"search"], opts[@"replacement"], caseInsensitive);
 
         } else if ([command isEqualToString:@"delete-line"]) {
             NSString *noteID = opts[@"id"];

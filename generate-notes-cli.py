@@ -443,7 +443,7 @@ static int cmdReadAttrs(id viewContext, NSString *title, NSString *folderName) {
     return cmdReadAttrsNote(note);
 }
 
-static int cmdCreateFolder(id viewContext, NSString *name) {
+static int cmdCreateFolder(id viewContext, NSString *name, NSString *parentName) {
     // Get the default account from an existing folder
     NSArray *folders = fetchFolders(viewContext);
     id account = nil;
@@ -453,16 +453,33 @@ static int cmdCreateFolder(id viewContext, NSString *name) {
     }
     if (!account) errorExit(@"No account found");
 
+    // If --parent specified, find the parent folder
+    id parentFolder = nil;
+    if (parentName) {
+        for (id f in folders) {
+            NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
+            if ([fname isEqualToString:parentName]) { parentFolder = f; break; }
+        }
+        if (!parentFolder) errorExit([NSString stringWithFormat:@"Parent folder not found: %@", parentName]);
+    }
+
     Class ICFolder = NSClassFromString(@"ICFolder");
     id newFolder = ((id (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("newFolderInAccount:"), account);
     if (!newFolder) errorExit(@"Failed to create folder");
     ((void (*)(id, SEL, id))objc_msgSend)(newFolder, sel_registerName("setTitle:"), name);
 
+    // Set parent folder relationship for nesting
+    if (parentFolder) {
+        ((void (*)(id, SEL, id))objc_msgSend)(newFolder, sel_registerName("setParent:"), parentFolder);
+    }
+
     NSError *error = nil;
     [viewContext save:&error];
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 
-    printJSON(@{@"name": name, @"created": @YES});
+    NSMutableDictionary *output = [NSMutableDictionary dictionaryWithDictionary:@{@"name": name, @"created": @YES}];
+    if (parentName) output[@"parent"] = parentName;
+    printJSON(output);
     return 0;
 }
 

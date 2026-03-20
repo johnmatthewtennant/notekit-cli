@@ -2111,7 +2111,7 @@ static void usage(void) {
     fprintf(stderr, "  notekit delete-range --id <id> --start <n> --length <n> [--body-offset]\n");
     fprintf(stderr, "  notekit set-attr --id <id> --offset <n> --length <n> [--style <n>] [--indent <n>] [--todo-done true|false] [--link <url>] [--body-offset]\n");
     fprintf(stderr, "  notekit move --id <id> --to <to-folder>\n");
-    fprintf(stderr, "  notekit create-folder --name <name>\n");
+    fprintf(stderr, "  notekit create-folder --name <name> [--parent <parent-folder>]\n");
     fprintf(stderr, "  notekit delete-folder --name <name>\n");
     fprintf(stderr, "  notekit search --query <query> [--folder <name>]\n");
     fprintf(stderr, "  notekit pin --id <id>\n");
@@ -2143,9 +2143,6 @@ static void usage(void) {
     fprintf(stderr, "\n");
     fprintf(stderr, "Testing:\n");
     fprintf(stderr, "  notekit test\n");
-    fprintf(stderr, "\n");
-    fprintf(stderr, "Report issues:\n");
-    fprintf(stderr, "  gh api repos/johnmatthewtennant/notekit-cli/issues --method POST -f title=\"...\" -f body=\"...\"\n");
 }
 
 

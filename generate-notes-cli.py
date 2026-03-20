@@ -443,13 +443,31 @@ static int cmdReadAttrs(id viewContext, NSString *title, NSString *folderName) {
     return cmdReadAttrsNote(note);
 }
 
-static int cmdCreateFolder(id viewContext, NSString *name) {
-    // Get the default account from an existing folder
+static int cmdCreateFolder(id viewContext, NSString *name, NSString *parentName) {
     NSArray *folders = fetchFolders(viewContext);
+
+    // If --parent specified, find the parent folder and use its account
+    id parentFolder = nil;
+    if (parentName) {
+        NSInteger matchCount = 0;
+        for (id f in folders) {
+            NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
+            if ([fname isEqualToString:parentName]) { parentFolder = f; matchCount++; }
+        }
+        if (!parentFolder) errorExit([NSString stringWithFormat:@"Parent folder not found: %@", parentName]);
+        if (matchCount > 1) errorExit([NSString stringWithFormat:@"Multiple folders named '%@' found — cannot determine parent unambiguously", parentName]);
+    }
+
+    // Get account: prefer parent's account when nesting, otherwise first available
     id account = nil;
-    for (id f in folders) {
-        account = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("account"));
-        if (account) break;
+    if (parentFolder) {
+        account = ((id (*)(id, SEL))objc_msgSend)(parentFolder, sel_registerName("account"));
+    }
+    if (!account) {
+        for (id f in folders) {
+            account = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("account"));
+            if (account) break;
+        }
     }
     if (!account) errorExit(@"No account found");
 
@@ -458,11 +476,18 @@ static int cmdCreateFolder(id viewContext, NSString *name) {
     if (!newFolder) errorExit(@"Failed to create folder");
     ((void (*)(id, SEL, id))objc_msgSend)(newFolder, sel_registerName("setTitle:"), name);
 
+    // Set parent folder relationship for nesting
+    if (parentFolder) {
+        ((void (*)(id, SEL, id))objc_msgSend)(newFolder, sel_registerName("setParent:"), parentFolder);
+    }
+
     NSError *error = nil;
     [viewContext save:&error];
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 
-    printJSON(@{@"name": name, @"created": @YES});
+    NSMutableDictionary *output = [NSMutableDictionary dictionaryWithDictionary:@{@"name": name, @"created": @YES}];
+    if (parentName) output[@"parent"] = parentName;
+    printJSON(output);
     return 0;
 }
 

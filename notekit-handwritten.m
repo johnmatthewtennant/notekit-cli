@@ -180,6 +180,31 @@ static int cmdDeleteRange(id viewContext, NSString *identifier, NSUInteger start
     return 0;
 }
 
+static int cmdSearchOffset(id viewContext, NSString *identifier, NSString *searchText, BOOL caseInsensitive) {
+    if (searchText.length == 0) errorExit(@"--text must not be empty");
+    id note = findNoteByID(viewContext, identifier);
+    if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", identifier]);
+
+    NSAttributedString *attrStr = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attributedString"));
+    NSString *fullText = [attrStr string];
+
+    NSStringCompareOptions options = caseInsensitive ? NSCaseInsensitiveSearch : 0;
+    NSRange found = [fullText rangeOfString:searchText options:options];
+    if (found.location == NSNotFound) {
+        fprintf(stderr, "Text not found: %s\n", [searchText UTF8String]);
+        return 1;
+    }
+
+    NSString *matchedText = [fullText substringWithRange:found];
+    printJSON(@{
+        @"offset": @(found.location),
+        @"length": @(found.length),
+        @"end": @(found.location + found.length),
+        @"text": matchedText
+    });
+    return 0;
+}
+
 static int cmdReplace(id viewContext, NSString *identifier, NSString *search, NSString *replacement) {
     id note = findNoteByID(viewContext, identifier);
     if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", identifier]);
@@ -1993,6 +2018,7 @@ static void usage(void) {
     fprintf(stderr, "  These compose multiple primitives for common operations. Everything they do\n");
     fprintf(stderr, "  can be accomplished with the primitive commands above.\n");
     fprintf(stderr, "\n");
+    fprintf(stderr, "  notekit search-offset --id <id> --text <text> [--case-insensitive]\n");
     fprintf(stderr, "  notekit replace --id <id> --search <text> --replacement <text>\n");
     fprintf(stderr, "  notekit read-structured (--title <title> | --id <id>) [--folder <name>]\n");
     fprintf(stderr, "  notekit read-markdown (--title <title> | --id <id>) [--folder <name>]\n");

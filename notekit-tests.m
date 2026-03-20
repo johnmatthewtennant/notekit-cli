@@ -3895,6 +3895,54 @@ static int cmdTest(id viewContext) {
         }
     }
 
+    // Test: search-offset (exact match)
+    fprintf(stderr, "Test: search-offset (exact match)...\n");
+    {
+        id noteForSO = findNote(viewContext, testTitle, testFolderName);
+        if (noteForSO) {
+            NSString *soId = noteToDict(noteForSO)[@"id"];
+            NSString *soCmd = [NSString stringWithFormat:@"search-offset --id '%@' --text 'Modified body'", soId];
+            id result = runCommandAndParseJSON(exePath, soCmd);
+            if (result && [result[@"text"] isEqualToString:@"Modified body"] &&
+                [result[@"length"] integerValue] == (NSInteger)[@"Modified body" length]) {
+                fprintf(stderr, "  PASS\n"); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (result: %s)\n", [[result description] UTF8String]); failed++;
+            }
+        } else { fprintf(stderr, "  FAIL (note not found)\n"); failed++; }
+    }
+
+    // Test: search-offset (case-insensitive)
+    fprintf(stderr, "Test: search-offset (case-insensitive)...\n");
+    {
+        id noteForSOci = findNote(viewContext, testTitle, testFolderName);
+        if (noteForSOci) {
+            NSString *ciId = noteToDict(noteForSOci)[@"id"];
+            NSString *ciCmd = [NSString stringWithFormat:@"search-offset --id '%@' --text 'modified BODY' --case-insensitive", ciId];
+            id result = runCommandAndParseJSON(exePath, ciCmd);
+            if (result && [result[@"text"] isEqualToString:@"Modified body"] &&
+                [result[@"length"] integerValue] == (NSInteger)[@"Modified body" length]) {
+                fprintf(stderr, "  PASS\n"); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (result: %s)\n", [[result description] UTF8String]); failed++;
+            }
+        } else { fprintf(stderr, "  FAIL (note not found)\n"); failed++; }
+    }
+
+    // Test: search-offset (not found)
+    fprintf(stderr, "Test: search-offset (not found)...\n");
+    {
+        id noteForSOerr = findNote(viewContext, testTitle, testFolderName);
+        if (noteForSOerr) {
+            NSString *errId = noteToDict(noteForSOerr)[@"id"];
+            NSString *errCmd = [NSString stringWithFormat:@"'%s' search-offset --id '%@' --text '__NONEXISTENT__'", exePath, errId];
+            BOOL errOk = NO;
+            RUN_EXPECT_FAIL(errCmd, errOk, @"Text not found");
+            if (errOk) { fprintf(stderr, "  PASS\n"); passed++; }
+            else { fprintf(stderr, "  FAIL (expected exit=1 with 'Text not found')\n"); failed++; }
+        } else { fprintf(stderr, "  FAIL (note not found)\n"); failed++; }
+    }
+
     // Test 19: Delete notes
     fprintf(stderr, "Test 19: Delete notes...\n");
     {
@@ -3923,7 +3971,7 @@ static int cmdTest(id viewContext) {
         else { fprintf(stderr, "  FAIL\n"); failed++; }
     }
 
-    // Test 20: Delete folder (using deleteFolder: class method)
+    // Test 20: Delete folder (markForDeletion + deleteObject, safe for shared folders)
     fprintf(stderr, "Test 20: Delete folder...\n");
     {
         Class ICFolder = NSClassFromString(@"ICFolder");

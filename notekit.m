@@ -171,7 +171,7 @@ int main(int argc, const char *argv[]) {
 
         } else if ([command isEqualToString:@"create-folder"]) {
             if (!kwName) { fprintf(stderr, "Error: --name required\n"); usage(); return 1; }
-            return cmdCreateFolder(viewContext, kwName);
+            return cmdCreateFolder(viewContext, kwName, opts[@"parent"]);
 
         } else if ([command isEqualToString:@"delete-folder"]) {
             if (!kwName) { fprintf(stderr, "Error: --name required\n"); usage(); return 1; }

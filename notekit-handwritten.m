@@ -1371,13 +1371,265 @@ static NSString *storageTextForPara(NSString *text) {
     return [text stringByReplacingOccurrencesOfString:@"\u2028" withString:@"\n"];
 }
 
-static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdown, BOOL dryRun, BOOL backup) {
-    // Get note identifier
-    NSString *identifier = noteToDict(note)[@"id"];
+// Apply inline runs (links, bold, italic, etc.) to a paragraph in the mergeableString.
+// pos: start of paragraph text in the mergeableString
+// textLen: length of the paragraph text (excluding trailing \n)
+// baseAttrs: the base paragraph attributes (TTStyle, etc.)
+// newPara: the paragraph model dict containing "runs" array
+// note, viewContext: for creating note-link inline attachments
+// ms: the mergeableString
+// Returns the cumulative delta from note-link FFFC replacements
+static NSInteger applyInlineRuns(id ms, id note, id viewContext, NSDictionary *newPara,
+                                  NSUInteger pos, NSUInteger textLen, NSDictionary *baseAttrs) {
+    NSArray *runs = newPara[@"runs"];
+    if (!runs) return 0;
 
-    // Build old and new paragraph models
+    NSInteger runDelta = 0;
+    for (NSDictionary *run in runs) {
+        NSUInteger runStart = [run[@"start"] unsignedIntegerValue] + runDelta;
+        NSUInteger runLen = [run[@"length"] unsignedIntegerValue];
+        if (runStart + runLen > (NSUInteger)((NSInteger)textLen + runDelta)) continue;
+
+        NSMutableDictionary *runAttrs = [baseAttrs mutableCopy];
+        if (run[@"link"]) {
+            NSURL *rawURL = [NSURL URLWithString:run[@"link"]];
+            if (rawURL && [[rawURL scheme] isEqualToString:@"applenotes"]) {
+                NSString *targetId = nil;
+                for (NSURLQueryItem *qi in [[NSURLComponents componentsWithURL:rawURL resolvingAgainstBaseURL:NO] queryItems]) {
+                    if ([qi.name isEqualToString:@"identifier"]) { targetId = qi.value; break; }
+                }
+                if (targetId) {
+                    id targetNote = findNoteByID(viewContext, targetId);
+                    if (targetNote) {
+                        Class ICInlineAttachmentClass = NSClassFromString(@"ICInlineAttachment");
+                        if (ICInlineAttachmentClass) {
+                            // Replace display text with U+FFFC
+                            ((void (*)(id, SEL, NSRange))objc_msgSend)(ms, sel_registerName("deleteCharactersInRange:"),
+                                NSMakeRange(pos + runStart, runLen));
+                            ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"),
+                                @"\uFFFC", pos + runStart);
+                            NSInteger delta = 1 - (NSInteger)runLen;
+                            runDelta += delta;
+                            runLen = 1;
+
+                            NSString *attUUID = [[NSUUID UUID] UUIDString];
+                            id attachment = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(
+                                ICInlineAttachmentClass,
+                                sel_registerName("newLinkAttachmentWithIdentifier:toNote:fromNote:parentAttachment:"),
+                                attUUID, targetNote, note, nil);
+                            if (attachment) {
+                                ((void (*)(id, SEL, id))objc_msgSend)(note, sel_registerName("addInlineAttachmentsObject:"), attachment);
+                                if (ICTTAttachmentClass) {
+                                    id ttAtt = [[ICTTAttachmentClass alloc] init];
+                                    ((void (*)(id, SEL, id))objc_msgSend)(ttAtt, sel_registerName("setAttachmentIdentifier:"), attUUID);
+                                    ((void (*)(id, SEL, id))objc_msgSend)(ttAtt, sel_registerName("setAttachmentUTI:"), @"com.apple.notes.inlinetextattachment.link");
+                                    runAttrs[@"NSAttachment"] = ttAtt;
+                                }
+                            }
+                        } else {
+                            Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities");
+                            NSURL *nativeURL = ICAppURLUtilities ? ((id (*)(id, SEL, id))objc_msgSend)(ICAppURLUtilities, sel_registerName("appURLForNote:"), targetNote) : nil;
+                            if (nativeURL) runAttrs[@"NSLink"] = nativeURL;
+                        }
+                    }
+                }
+            } else if (rawURL) {
+                runAttrs[@"NSLink"] = rawURL;
+            }
+        }
+        if ([run[@"strikethrough"] boolValue]) runAttrs[@"TTStrikethrough"] = @1;
+        {
+            NSUInteger hints = 0;
+            if ([run[@"bold"] boolValue]) hints |= 1;
+            if ([run[@"italic"] boolValue]) hints |= 2;
+            if (hints > 0) runAttrs[@"TTHints"] = @(hints);
+        }
+        if ([run[@"underline"] boolValue]) runAttrs[@"TTUnderline"] = @1;
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
+            runAttrs, NSMakeRange(pos + runStart, runLen));
+    }
+    return runDelta;
+}
+
+// Full-replace write: clear note content and rewrite from scratch.
+// This avoids diff algorithm issues that cause corruption on repeated writes.
+static int cmdWriteMarkdownFullReplace(id note, id viewContext, NSString *identifier,
+                                        NSArray *newModel, BOOL dryRun, BOOL backup) {
+    // For dry-run, compute a diff summary to show what would change
+    if (dryRun) {
+        NSArray *oldModel = noteToParaModel(note);
+        NSMutableArray *filteredOld = [NSMutableArray array];
+        BOOL foundContent = NO;
+        for (NSDictionary *para in oldModel) {
+            if (!foundContent && [para[@"text"] length] == 0) continue;
+            foundContent = YES;
+            [filteredOld addObject:para];
+        }
+
+        NSMutableArray *oldSigs = [NSMutableArray array];
+        for (NSDictionary *p in filteredOld) [oldSigs addObject:paraSignature(p)];
+        NSMutableArray *newSigs = [NSMutableArray array];
+        for (NSDictionary *p in newModel) [newSigs addObject:paraSignature(p)];
+
+        NSArray *lcsPairs = computeLCS(oldSigs, newSigs);
+        NSMutableSet *matchedOld = [NSMutableSet set];
+        NSMutableSet *matchedNew = [NSMutableSet set];
+        for (NSArray *pair in lcsPairs) {
+            [matchedOld addObject:pair[0]];
+            [matchedNew addObject:pair[1]];
+        }
+
+        NSUInteger deleted = 0, inserted = 0, modified = 0;
+        NSMutableArray *mutations = [NSMutableArray array];
+        for (NSUInteger i = 0; i < filteredOld.count; i++) {
+            if (![matchedOld containsObject:@(i)]) {
+                deleted++;
+                [mutations addObject:@{@"type": @"delete", @"oldIndex": @(i),
+                    @"oldText": filteredOld[i][@"text"]}];
+            }
+        }
+        for (NSUInteger j = 0; j < newModel.count; j++) {
+            if ([matchedNew containsObject:@(j)]) {
+                NSArray *pair = nil;
+                for (NSArray *p in lcsPairs) {
+                    if ([p[1] isEqual:@(j)]) { pair = p; break; }
+                }
+                if (pair) {
+                    NSUInteger oldIdx = [pair[0] unsignedIntegerValue];
+                    if (oldIdx < filteredOld.count && !paragraphsEqual(filteredOld[oldIdx], newModel[j])) {
+                        modified++;
+                        [mutations addObject:@{@"type": @"modify", @"oldIndex": @(oldIdx),
+                            @"newIndex": @(j), @"oldText": filteredOld[oldIdx][@"text"],
+                            @"newText": newModel[j][@"text"]}];
+                    }
+                }
+            } else {
+                inserted++;
+                [mutations addObject:@{@"type": @"insert", @"newIndex": @(j),
+                    @"text": newModel[j][@"text"]}];
+            }
+        }
+
+        NSUInteger unchanged = filteredOld.count - deleted - modified;
+        NSMutableDictionary *summary = [NSMutableDictionary dictionary];
+        summary[@"id"] = identifier;
+        summary[@"mode"] = @"replace";
+        summary[@"paragraphsUnchanged"] = @(unchanged);
+        summary[@"paragraphsModified"] = @(modified);
+        summary[@"paragraphsInserted"] = @(inserted);
+        summary[@"paragraphsDeleted"] = @(deleted);
+        summary[@"mutations"] = mutations;
+        printJSON(summary);
+        return 0;
+    }
+
+    // Backup if requested
+    if (backup) {
+        NSString *title = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("title"));
+        NSString *backupTitle = [NSString stringWithFormat:@"[backup] %@", title ?: @"Untitled"];
+        cmdDuplicate(viewContext, identifier, backupTitle);
+        note = findNoteByID(viewContext, identifier);
+    }
+
+    id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+    id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+    NSUInteger origMsLen = ((NSUInteger (*)(id, SEL))objc_msgSend)(ms, sel_registerName("length"));
+
+    // Remove existing inline attachments (note links) before clearing content
+    id inlineAttachments = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("inlineAttachments"));
+    if (inlineAttachments && [inlineAttachments count] > 0) {
+        NSSet *inlineAttSet = [inlineAttachments copy];
+        for (id ia in inlineAttSet) {
+            [viewContext deleteObject:ia];
+        }
+    }
+
+    ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("beginEditing"));
+
+    // Delete all existing content
+    if (origMsLen > 0) {
+        ((void (*)(id, SEL, NSRange))objc_msgSend)(ms, sel_registerName("deleteCharactersInRange:"),
+            NSMakeRange(0, origMsLen));
+    }
+
+    // Build the full text string from the new model
+    NSMutableString *fullText = [NSMutableString string];
+    for (NSUInteger i = 0; i < newModel.count; i++) {
+        [fullText appendString:newModel[i][@"text"]];
+        if (i < newModel.count - 1) [fullText appendString:@"\n"];
+    }
+
+    // Insert all content at once
+    if (fullText.length > 0) {
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"),
+            fullText, 0);
+    }
+
+    // Apply styles and inline runs paragraph by paragraph
+    NSUInteger offset = 0;
+    NSInteger totalRunDelta = 0;
+    for (NSUInteger i = 0; i < newModel.count; i++) {
+        NSDictionary *para = newModel[i];
+        NSString *text = para[@"text"];
+        NSUInteger textLen = text.length;
+        // Paragraph range includes trailing \n except for the last paragraph
+        NSUInteger paraLen = textLen + (i < newModel.count - 1 ? 1 : 0);
+
+        NSInteger style = [para[@"style"] integerValue];
+        NSUInteger indent = [para[@"indent"] unsignedIntegerValue];
+
+        id paraStyle = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(paraStyle, sel_registerName("setStyle:"), (NSUInteger)style);
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(paraStyle, sel_registerName("setIndent:"), indent);
+
+        if (style == 103) {
+            BOOL checked = [para[@"todoChecked"] boolValue];
+            id todo = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
+                [ICTTTodoClass alloc], sel_registerName("initWithIdentifier:done:"), [NSUUID UUID], checked);
+            ((void (*)(id, SEL, id))objc_msgSend)(paraStyle, sel_registerName("setTodo:"), todo);
+        }
+
+        NSMutableDictionary *attrs = [NSMutableDictionary dictionary];
+        attrs[@"TTStyle"] = paraStyle;
+
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
+            attrs, NSMakeRange(offset + totalRunDelta, paraLen));
+
+        // Apply inline runs (links, bold, italic, etc.)
+        NSInteger runDelta = applyInlineRuns(ms, note, viewContext, para,
+            offset + totalRunDelta, textLen, attrs);
+        totalRunDelta += runDelta;
+
+        offset += paraLen;
+    }
+
+    // Save
+    NSInteger totalDelta = (NSInteger)fullText.length + totalRunDelta - (NSInteger)origMsLen;
+    NSUInteger newLen = (NSUInteger)((NSInteger)origMsLen + totalDelta);
+    ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+        note, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, newLen), totalDelta);
+    ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("endEditing"));
+    ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("saveNoteData"));
+    NSError *error = nil;
+    [viewContext save:&error];
+    if (error) {
+        errorExit([NSString stringWithFormat:@"Save error: %@", error]);
+    }
+
+    // Print summary
+    NSMutableDictionary *summary = [NSMutableDictionary dictionary];
+    summary[@"id"] = identifier;
+    summary[@"mode"] = @"replace";
+    summary[@"paragraphsWritten"] = @(newModel.count);
+    printJSON(summary);
+    return 0;
+}
+
+// Diff-based write: compute LCS diff and apply incremental mutations.
+// Preserved for backward compatibility via --diff flag.
+static int cmdWriteMarkdownDiff(id note, id viewContext, NSString *identifier,
+                                 NSArray *newModel, BOOL dryRun, BOOL backup) {
     NSArray *oldModel = noteToParaModel(note);
-    NSArray *newModel = markdownToParaModel(markdown);
 
     // Filter out leading empty paragraphs from old model (canonical leading \n)
     NSMutableArray *filteredOld = [NSMutableArray array];
@@ -1417,7 +1669,6 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
     }
 
     // Identify insertions (in new but not matched) and modifications (matched but changed)
-    NSUInteger pairIdx = 0;
     for (NSUInteger j = 0; j < newModel.count; j++) {
         if ([matchedNew containsObject:@(j)]) {
             // Find the corresponding pair
@@ -1425,17 +1676,15 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
             for (NSArray *p in lcsPairs) {
                 if ([p[1] isEqual:@(j)]) { pair = p; break; }
             }
-            if (!pair) continue; // guard: matched entry with no corresponding LCS pair (corrupted state)
+            if (!pair) continue;
             NSUInteger oldIdx = [pair[0] unsignedIntegerValue];
-            if (oldIdx >= filteredOld.count) continue; // guard: out-of-bounds old index
-            // Check if the matched pair actually differs in some way
+            if (oldIdx >= filteredOld.count) continue;
             if (!paragraphsEqual(filteredOld[oldIdx], newModel[j])) {
                 [mutations addObject:@{@"type": @"modify", @"oldIndex": @(oldIdx),
                     @"newIndex": @(j), @"oldText": filteredOld[oldIdx][@"text"],
                     @"newText": newModel[j][@"text"]}];
             }
         } else {
-            // Insert - figure out where to insert (after the last matched old index before this)
             NSInteger insertAfterOld = -1;
             for (NSArray *p in lcsPairs) {
                 if ([p[1] unsignedIntegerValue] < j) {
@@ -1459,6 +1708,7 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
     // Build output JSON
     NSMutableDictionary *summary = [NSMutableDictionary dictionary];
     summary[@"id"] = identifier;
+    summary[@"mode"] = @"diff";
     summary[@"paragraphsUnchanged"] = @(unchanged);
     summary[@"paragraphsModified"] = @(modified);
     summary[@"paragraphsInserted"] = @(inserted);
@@ -1481,7 +1731,6 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
         NSString *title = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("title"));
         NSString *backupTitle = [NSString stringWithFormat:@"[backup] %@", title ?: @"Untitled"];
         cmdDuplicate(viewContext, identifier, backupTitle);
-        // Re-fetch note after duplicate
         note = findNoteByID(viewContext, identifier);
     }
 
@@ -1493,8 +1742,7 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
     NSUInteger msLen = ((NSUInteger (*)(id, SEL))objc_msgSend)(ms, sel_registerName("length"));
 
     // Compute paragraph offsets in the full text
-    // Each paragraph is separated by \n
-    NSMutableArray *paraRanges = [NSMutableArray array]; // NSRange as @[@(loc), @(len)]
+    NSMutableArray *paraRanges = [NSMutableArray array];
     {
         NSUInteger paraStart = 0;
         for (NSUInteger i = 0; i <= fullText.length; i++) {
@@ -1506,11 +1754,7 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
     }
 
     // Map filteredOld indices to paraRange indices
-    // The filteredOld skips leading empty paragraphs, so we need to find the offset
-    NSUInteger leadingSkipped = oldModel.count - filteredOld.count;
-    // Verify: leading paragraphs in oldModel that were skipped
-    // Actually, let's count them properly
-    leadingSkipped = 0;
+    NSUInteger leadingSkipped = 0;
     foundContent = NO;
     for (NSUInteger i = 0; i < oldModel.count; i++) {
         NSString *text = oldModel[i][@"text"];
@@ -1524,8 +1768,7 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("beginEditing"));
 
     // Build a unified operation list, ordered by position descending (bottom to top).
-    // Processing bottom-to-top means each op uses original offsets (ops above are unaffected).
-    NSMutableArray *ops = [NSMutableArray array]; // each op: {position, type, ...}
+    NSMutableArray *ops = [NSMutableArray array];
 
     for (NSDictionary *m in mutations) {
         if ([m[@"type"] isEqualToString:@"delete"]) {
@@ -1534,13 +1777,12 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
             if (paraIdx >= paraRanges.count) continue;
             NSUInteger paraStart = [paraRanges[paraIdx][0] unsignedIntegerValue];
             NSUInteger paraLen = [paraRanges[paraIdx][1] unsignedIntegerValue];
-            // Include trailing newline
             NSUInteger deleteStart = paraStart;
             NSUInteger deleteLen = paraLen;
             if (deleteStart + deleteLen < fullText.length) {
-                deleteLen++; // trailing \n
+                deleteLen++;
             } else if (deleteStart > 0) {
-                deleteStart--; // preceding \n for last paragraph
+                deleteStart--;
                 deleteLen++;
             }
             [ops addObject:@{@"op": @"delete", @"pos": @(deleteStart), @"len": @(deleteLen)}];
@@ -1563,7 +1805,6 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
                 if (leadingSkipped > 0 && paraRanges.count > leadingSkipped) {
                     insertPos = [paraRanges[leadingSkipped][0] unsignedIntegerValue];
                 } else if (paraRanges.count > 0) {
-                    // Insert after the first paragraph (title)
                     NSUInteger pStart = [paraRanges[0][0] unsignedIntegerValue];
                     NSUInteger pLen = [paraRanges[0][1] unsignedIntegerValue];
                     insertPos = pStart + pLen + 1;
@@ -1587,16 +1828,12 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
     }
 
     // Sort operations by position descending (bottom to top)
-    // For same position: delete before insert (delete first to avoid shifting insert targets)
     [ops sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
         NSComparisonResult cmp = [b[@"pos"] compare:a[@"pos"]];
         if (cmp != NSOrderedSame) return cmp;
-        // At same position: deletes before inserts (delete removes old content first)
         int prioA = [a[@"op"] isEqualToString:@"delete"] ? 0 : ([a[@"op"] isEqualToString:@"modify"] ? 1 : 2);
         int prioB = [b[@"op"] isEqualToString:@"delete"] ? 0 : ([b[@"op"] isEqualToString:@"modify"] ? 1 : 2);
         if (prioA != prioB) return prioA < prioB ? NSOrderedAscending : NSOrderedDescending;
-        // For inserts at the same position, process higher newIndex first so paragraphs
-        // end up in correct top-to-bottom order after bottom-to-top insertion
         if (prioA == 2) return [b[@"newIndex"] compare:a[@"newIndex"]];
         return NSOrderedSame;
     }];
@@ -1673,77 +1910,8 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
                 ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
                     patchedAttrs, NSMakeRange(pos, paraLen));
 
-                NSArray *newRuns = newPara[@"runs"];
-                if (newRuns) {
-                    NSInteger runDelta = 0; // tracks offset shift from note-link replacements
-                    for (NSDictionary *run in newRuns) {
-                        NSUInteger runStart = [run[@"start"] unsignedIntegerValue] + runDelta;
-                        NSUInteger runLen = [run[@"length"] unsignedIntegerValue];
-                        if (runStart + runLen > (NSUInteger)((NSInteger)paraLen + runDelta)) continue;
-                        NSMutableDictionary *runAttrs = [patchedAttrs mutableCopy];
-                        if (run[@"link"]) {
-                            NSURL *rawURL = [NSURL URLWithString:run[@"link"]];
-                            if (rawURL && [[rawURL scheme] isEqualToString:@"applenotes"]) {
-                                NSString *targetId = nil;
-                                for (NSURLQueryItem *qi in [[NSURLComponents componentsWithURL:rawURL resolvingAgainstBaseURL:NO] queryItems]) {
-                                    if ([qi.name isEqualToString:@"identifier"]) { targetId = qi.value; break; }
-                                }
-                                if (targetId) {
-                                    id targetNote = findNoteByID(viewContext, targetId);
-                                    if (targetNote) {
-                                        // Create native ICInlineAttachment note-to-note link
-                                        Class ICInlineAttachmentClass = NSClassFromString(@"ICInlineAttachment");
-                                        if (ICInlineAttachmentClass) {
-                                            // Replace display text with U+FFFC
-                                            ((void (*)(id, SEL, NSRange))objc_msgSend)(ms, sel_registerName("deleteCharactersInRange:"),
-                                                NSMakeRange(pos + runStart, runLen));
-                                            ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"),
-                                                @"\uFFFC", pos + runStart);
-                                            NSInteger delta = 1 - (NSInteger)runLen;
-                                            runDelta += delta;
-                                            cumulativeDelta += delta;
-                                            runLen = 1;
-
-                                            // Create the inline attachment (CoreData entity)
-                                            NSString *attUUID = [[NSUUID UUID] UUIDString];
-                                            id attachment = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(
-                                                ICInlineAttachmentClass,
-                                                sel_registerName("newLinkAttachmentWithIdentifier:toNote:fromNote:parentAttachment:"),
-                                                attUUID, targetNote, note, nil);
-                                            if (attachment) {
-                                                ((void (*)(id, SEL, id))objc_msgSend)(note, sel_registerName("addInlineAttachmentsObject:"), attachment);
-                                                // Create ICTTAttachment for the mergeableString attribute
-                                                if (ICTTAttachmentClass) {
-                                                    id ttAtt = [[ICTTAttachmentClass alloc] init];
-                                                    ((void (*)(id, SEL, id))objc_msgSend)(ttAtt, sel_registerName("setAttachmentIdentifier:"), attUUID);
-                                                    ((void (*)(id, SEL, id))objc_msgSend)(ttAtt, sel_registerName("setAttachmentUTI:"), @"com.apple.notes.inlinetextattachment.link");
-                                                    runAttrs[@"NSAttachment"] = ttAtt;
-                                                }
-                                            }
-                                        } else {
-                                            // Fallback: use NSLink if ICInlineAttachment unavailable
-                                            Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities");
-                                            NSURL *nativeURL = ICAppURLUtilities ? ((id (*)(id, SEL, id))objc_msgSend)(ICAppURLUtilities, sel_registerName("appURLForNote:"), targetNote) : nil;
-                                            if (nativeURL) runAttrs[@"NSLink"] = nativeURL;
-                                        }
-                                    }
-                                }
-                            } else if (rawURL) {
-                                runAttrs[@"NSLink"] = rawURL;
-                            }
-                        }
-                        if ([run[@"strikethrough"] boolValue]) runAttrs[@"TTStrikethrough"] = @1;
-                        {
-                            NSUInteger hints = 0;
-                            if ([run[@"bold"] boolValue]) hints |= 1;
-                            if ([run[@"italic"] boolValue]) hints |= 2;
-                            if (hints > 0) runAttrs[@"TTHints"] = @(hints);
-                        }
-                        if ([run[@"underline"] boolValue]) runAttrs[@"TTUnderline"] = @1;
-                        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
-                            runAttrs, NSMakeRange(pos + runStart, runLen));
-                    }
-                }
+                NSInteger runDelta = applyInlineRuns(ms, note, viewContext, newPara, pos, paraLen, patchedAttrs);
+                cumulativeDelta += runDelta;
             }
         }
         else if ([opType isEqualToString:@"insert"]) {
@@ -1780,76 +1948,7 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
             ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
                 attrs, NSMakeRange(pos, toInsert.length));
 
-            NSArray *newRuns = newPara[@"runs"];
-            NSInteger insertRunDelta = 0; // tracks offset shift from note-link replacements
-            if (newRuns) {
-                for (NSDictionary *run in newRuns) {
-                    NSUInteger runStart = [run[@"start"] unsignedIntegerValue] + insertRunDelta;
-                    NSUInteger runLen = [run[@"length"] unsignedIntegerValue];
-                    if (runStart + runLen > (NSUInteger)((NSInteger)newText.length + insertRunDelta)) continue;
-                    NSMutableDictionary *runAttrs = [attrs mutableCopy];
-                    if (run[@"link"]) {
-                        NSURL *rawURL = [NSURL URLWithString:run[@"link"]];
-                        if (rawURL && [[rawURL scheme] isEqualToString:@"applenotes"]) {
-                            NSString *targetId = nil;
-                            for (NSURLQueryItem *qi in [[NSURLComponents componentsWithURL:rawURL resolvingAgainstBaseURL:NO] queryItems]) {
-                                if ([qi.name isEqualToString:@"identifier"]) { targetId = qi.value; break; }
-                            }
-                            if (targetId) {
-                                id targetNote = findNoteByID(viewContext, targetId);
-                                if (targetNote) {
-                                    // Create native ICInlineAttachment note-to-note link
-                                    Class ICInlineAttachmentClass = NSClassFromString(@"ICInlineAttachment");
-                                    if (ICInlineAttachmentClass) {
-                                        // Replace display text with U+FFFC
-                                        ((void (*)(id, SEL, NSRange))objc_msgSend)(ms, sel_registerName("deleteCharactersInRange:"),
-                                            NSMakeRange(pos + runStart, runLen));
-                                        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"),
-                                            @"\uFFFC", pos + runStart);
-                                        NSInteger delta = 1 - (NSInteger)runLen;
-                                        insertRunDelta += delta;
-                                        runLen = 1;
-
-                                        // Create the inline attachment (CoreData entity)
-                                        NSString *attUUID = [[NSUUID UUID] UUIDString];
-                                        id attachment = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(
-                                            ICInlineAttachmentClass,
-                                            sel_registerName("newLinkAttachmentWithIdentifier:toNote:fromNote:parentAttachment:"),
-                                            attUUID, targetNote, note, nil);
-                                        if (attachment) {
-                                            ((void (*)(id, SEL, id))objc_msgSend)(note, sel_registerName("addInlineAttachmentsObject:"), attachment);
-                                            // Create ICTTAttachment for the mergeableString attribute
-                                            if (ICTTAttachmentClass) {
-                                                id ttAtt = [[ICTTAttachmentClass alloc] init];
-                                                ((void (*)(id, SEL, id))objc_msgSend)(ttAtt, sel_registerName("setAttachmentIdentifier:"), attUUID);
-                                                ((void (*)(id, SEL, id))objc_msgSend)(ttAtt, sel_registerName("setAttachmentUTI:"), @"com.apple.notes.inlinetextattachment.link");
-                                                runAttrs[@"NSAttachment"] = ttAtt;
-                                            }
-                                        }
-                                    } else {
-                                        // Fallback: use NSLink if ICInlineAttachment unavailable
-                                        Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities");
-                                        NSURL *nativeURL = ICAppURLUtilities ? ((id (*)(id, SEL, id))objc_msgSend)(ICAppURLUtilities, sel_registerName("appURLForNote:"), targetNote) : nil;
-                                        if (nativeURL) runAttrs[@"NSLink"] = nativeURL;
-                                    }
-                                }
-                            }
-                        } else if (rawURL) {
-                            runAttrs[@"NSLink"] = rawURL;
-                        }
-                    }
-                    if ([run[@"strikethrough"] boolValue]) runAttrs[@"TTStrikethrough"] = @1;
-                    {
-                        NSUInteger hints = 0;
-                        if ([run[@"bold"] boolValue]) hints |= 1;
-                        if ([run[@"italic"] boolValue]) hints |= 2;
-                        if (hints > 0) runAttrs[@"TTHints"] = @(hints);
-                    }
-                    if ([run[@"underline"] boolValue]) runAttrs[@"TTUnderline"] = @1;
-                    ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
-                        runAttrs, NSMakeRange(pos + runStart, runLen));
-                }
-            }
+            NSInteger insertRunDelta = applyInlineRuns(ms, note, viewContext, newPara, pos, newText.length, attrs);
 
             cumulativeDelta += (NSInteger)toInsert.length + insertRunDelta;
         }
@@ -1876,13 +1975,24 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
     return 0;
 }
 
-static int cmdWriteMarkdownNote(id note, id viewContext, BOOL dryRun, BOOL backup) {
+static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdown, BOOL dryRun, BOOL backup, BOOL diffMode) {
+    NSString *identifier = noteToDict(note)[@"id"];
+    NSArray *newModel = markdownToParaModel(markdown);
+
+    if (diffMode) {
+        return cmdWriteMarkdownDiff(note, viewContext, identifier, newModel, dryRun, backup);
+    } else {
+        return cmdWriteMarkdownFullReplace(note, viewContext, identifier, newModel, dryRun, backup);
+    }
+}
+
+static int cmdWriteMarkdownNote(id note, id viewContext, BOOL dryRun, BOOL backup, BOOL diffMode) {
     // Read markdown from stdin
     NSFileHandle *input = [NSFileHandle fileHandleWithStandardInput];
     NSData *data = [input readDataToEndOfFile];
     NSString *markdown = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     if (!markdown) errorExit(@"Failed to read markdown from stdin (invalid UTF-8)");
-    return cmdWriteMarkdownWithString(note, viewContext, markdown, dryRun, backup);
+    return cmdWriteMarkdownWithString(note, viewContext, markdown, dryRun, backup, diffMode);
 }
 
 
@@ -2022,7 +2132,7 @@ static void usage(void) {
     fprintf(stderr, "  notekit replace --id <id> --search <text> --replacement <text>\n");
     fprintf(stderr, "  notekit read-structured (--title <title> | --id <id>) [--folder <name>]\n");
     fprintf(stderr, "  notekit read-markdown (--title <title> | --id <id>) [--folder <name>]\n");
-    fprintf(stderr, "  notekit write-markdown --id <id> [--dry-run] [--backup]            Read markdown from stdin, diff-update note\n");
+    fprintf(stderr, "  notekit write-markdown --id <id> [--dry-run] [--backup] [--diff]    Read markdown from stdin, replace note content\n");
     fprintf(stderr, "  notekit duplicate --id <id> [--new-title <new-title>]\n");
     fprintf(stderr, "  notekit delete-line --id <id> --search-text <search-text>\n");
     fprintf(stderr, "  notekit add-link --id <id> --target <id> [--text <text>] [--position <n>]   Insert note-to-note link\n");

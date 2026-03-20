@@ -410,24 +410,32 @@ static int cmdReadAttrs(id viewContext, NSString *title, NSString *folderName) {
 }
 
 static int cmdCreateFolder(id viewContext, NSString *name, NSString *parentName) {
-    // Get the default account from an existing folder
     NSArray *folders = fetchFolders(viewContext);
-    id account = nil;
-    for (id f in folders) {
-        account = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("account"));
-        if (account) break;
-    }
-    if (!account) errorExit(@"No account found");
 
-    // If --parent specified, find the parent folder
+    // If --parent specified, find the parent folder and use its account
     id parentFolder = nil;
     if (parentName) {
+        NSInteger matchCount = 0;
         for (id f in folders) {
             NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
-            if ([fname isEqualToString:parentName]) { parentFolder = f; break; }
+            if ([fname isEqualToString:parentName]) { parentFolder = f; matchCount++; }
         }
         if (!parentFolder) errorExit([NSString stringWithFormat:@"Parent folder not found: %@", parentName]);
+        if (matchCount > 1) errorExit([NSString stringWithFormat:@"Multiple folders named '%@' found — cannot determine parent unambiguously", parentName]);
     }
+
+    // Get account: prefer parent's account when nesting, otherwise first available
+    id account = nil;
+    if (parentFolder) {
+        account = ((id (*)(id, SEL))objc_msgSend)(parentFolder, sel_registerName("account"));
+    }
+    if (!account) {
+        for (id f in folders) {
+            account = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("account"));
+            if (account) break;
+        }
+    }
+    if (!account) errorExit(@"No account found");
 
     Class ICFolder = NSClassFromString(@"ICFolder");
     id newFolder = ((id (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("newFolderInAccount:"), account);

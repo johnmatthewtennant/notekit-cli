@@ -3983,6 +3983,38 @@ static int cmdTest(id viewContext) {
             }
         }
     }
+
+    // Test: Nested folder creation via subprocess (JSON output)
+    fprintf(stderr, "Test: Nested folder creation (subprocess)...\n");
+    {
+        NSString *subCmd = [NSString stringWithFormat:@"'%s' create-folder --name '__nested_sub_test__' --parent '%@'", exePath, testFolderName];
+        id result = runCommandAndParseJSON(exePath, [NSString stringWithFormat:@"create-folder --name '__nested_sub_test__' --parent '%@'", testFolderName]);
+        if (result && [result[@"created"] boolValue] && [result[@"parent"] isEqualToString:testFolderName]) {
+            fprintf(stderr, "  PASS\n"); passed++;
+            // Clean up the subfolder
+            for (id f in fetchFolders(viewContext)) {
+                NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
+                if ([fname isEqualToString:@"__nested_sub_test__"]) {
+                    @try { ((void (*)(id, SEL))objc_msgSend)(f, sel_registerName("markForDeletion")); } @catch (id e) {}
+                    [viewContext deleteObject:f];
+                    [viewContext save:nil];
+                    break;
+                }
+            }
+        } else {
+            fprintf(stderr, "  FAIL (result: %s)\n", [[result description] UTF8String]); failed++;
+        }
+    }
+
+    // Test: Nested folder creation error path (nonexistent parent)
+    fprintf(stderr, "Test: Nested folder error (parent not found)...\n");
+    {
+        NSString *errCmd = [NSString stringWithFormat:@"'%s' create-folder --name 'test' --parent '__nonexistent_parent__'", exePath];
+        BOOL errOk = NO;
+        RUN_EXPECT_FAIL(errCmd, errOk, @"Parent folder not found");
+        if (errOk) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (expected exit=1 with 'Parent folder not found')\n"); failed++; }
+    }
     // Test 19: Delete notes
     fprintf(stderr, "Test 19: Delete notes...\n");
     {

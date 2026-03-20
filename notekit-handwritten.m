@@ -1345,26 +1345,6 @@ static NSArray *computeLCS(NSArray *oldSigs, NSArray *newSigs) {
     return pairs;
 }
 
-// Compute character offsets for each paragraph in the note's mergeableString
-static NSArray *computeParaOffsets(id note) {
-    NSAttributedString *attrStr = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attributedString"));
-    NSString *fullText = [attrStr string];
-    NSUInteger length = fullText.length;
-
-    if (length == 0) return @[];
-
-    NSMutableArray *offsets = [NSMutableArray array];
-    NSUInteger paraStart = 0;
-    for (NSUInteger i = 0; i <= length; i++) {
-        if (i == length || [fullText characterAtIndex:i] == '\n') {
-            [offsets addObject:@[@(paraStart), @(i - paraStart)]];
-            paraStart = i + 1;
-        }
-    }
-
-    return offsets;
-}
-
 // Convert para model text (which uses U+2028 for soft line breaks) to Apple Notes
 // storage format (which uses \n within a single attribute range).
 static NSString *storageTextForPara(NSString *text) {

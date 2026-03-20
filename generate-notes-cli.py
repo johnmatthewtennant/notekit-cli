@@ -627,6 +627,15 @@ static int cmdSetAttr(id viewContext, NSString *identifier,
 
     BOOL hasStyleOpts = (attrOpts[@"style"] || attrOpts[@"indent"] || attrOpts[@"todo-done"]);
     BOOL hasLinkOpt = (attrOpts[@"link"] != nil);
+    BOOL hasStrikethroughOpt = (attrOpts[@"strikethrough"] != nil);
+
+    // Validate --strikethrough upfront if provided
+    if (hasStrikethroughOpt) {
+        NSString *val = attrOpts[@"strikethrough"];
+        if (![val isEqualToString:@"true"] && ![val isEqualToString:@"false"]) {
+            errorExit(@"--strikethrough must be 'true' or 'false'");
+        }
+    }
 
     // Validate --style upfront if provided
     if (attrOpts[@"style"]) {
@@ -763,6 +772,15 @@ static int cmdSetAttr(id viewContext, NSString *identifier,
                     patchedAttrs[@"NSLink"] = linkURL;
                 } else {
                     [patchedAttrs removeObjectForKey:@"NSLink"];
+                }
+            }
+
+            // Apply strikethrough delta if requested
+            if (hasStrikethroughOpt) {
+                if ([attrOpts[@"strikethrough"] isEqualToString:@"true"]) {
+                    patchedAttrs[@"TTStrikethrough"] = @1;
+                } else {
+                    [patchedAttrs removeObjectForKey:@"TTStrikethrough"];
                 }
             }
 

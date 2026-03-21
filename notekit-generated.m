@@ -32,6 +32,57 @@ static void errorExit(NSString *msg) {
     exit(1);
 }
 
+// Recursively check an NSError chain for a specific domain+code pair.
+// Inspects the error itself, NSUnderlyingError, and NSDetailedErrors.
+static BOOL errorChainContains(NSError *error, NSString *domain, NSInteger code) {
+    if (!error) return NO;
+    if ([[error domain] isEqualToString:domain] && [error code] == code) return YES;
+    // Check single underlying error
+    NSError *underlying = [[error userInfo] objectForKey:@"NSUnderlyingError"];
+    if (errorChainContains(underlying, domain, code)) return YES;
+    // Check detailed errors array (Core Data batch errors)
+    NSArray *detailed = [[error userInfo] objectForKey:@"NSDetailedErrors"];
+    for (NSError *detail in detailed) {
+        if (errorChainContains(detail, domain, code)) return YES;
+    }
+    return NO;
+}
+
+// Check if a Core Data error is a permission/sandbox denial and print
+// actionable troubleshooting steps. Returns YES if it handled the error
+// (and exited), NO if the error is unrelated to permissions.
+static BOOL checkNotesAccessError(NSError *error) {
+    if (!error) return NO;
+    // NSCocoaErrorDomain 256 = NSFileReadNoPermissionError (sandbox / Full Disk Access)
+    BOOL isSandbox = errorChainContains(error, @"NSCocoaErrorDomain", 256);
+    // NSSQLiteErrorDomain 23 = SQLITE_AUTH (sandbox denied at SQLite level)
+    if (!isSandbox) isSandbox = errorChainContains(error, @"NSSQLiteErrorDomain", 23);
+    // NSCocoaErrorDomain 4097 = NSXPCConnectionInterrupted — only treat as
+    // permission denied when the description mentions access/permission to
+    // avoid false positives from transient XPC failures.
+    BOOL isPermDenied = NO;
+    if (errorChainContains(error, @"NSCocoaErrorDomain", 4097)) {
+        NSString *desc = [[error localizedDescription] lowercaseString];
+        if ([desc containsString:@"permission"] || [desc containsString:@"denied"] ||
+            [desc containsString:@"access"]) {
+            isPermDenied = YES;
+        }
+    }
+    if (!isSandbox && !isPermDenied) return NO;
+
+    fprintf(stderr, "Error: Notes access denied.\n\n");
+    fprintf(stderr, "notekit requires Full Disk Access to read Apple Notes.\n\n");
+    fprintf(stderr, "1. Open System Settings > Privacy & Security > Full Disk Access\n");
+    fprintf(stderr, "2. Add your terminal app (e.g. iTerm, Terminal, Ghostty)\n\n");
+    fprintf(stderr, "If you previously denied access, reset and re-grant:\n");
+    fprintf(stderr, "   tccutil reset SystemPolicyAllFiles <bundle-id>\n\n");
+    fprintf(stderr, "   Find your terminal's bundle ID:\n");
+    fprintf(stderr, "   osascript -e 'id of app \"iTerm\"'  (replace iTerm with your terminal app name)\n\n");
+    fprintf(stderr, "Then retry: notekit folders\n");
+    exit(1);
+    return YES; // unreachable, silences compiler warning
+}
+
 static BOOL isStrictInteger(NSString *str, NSInteger *outValue) {
     NSScanner *scanner = [NSScanner scannerWithString:str];
     NSInteger value;
@@ -92,7 +143,10 @@ static NSArray *fetchFolders(id viewContext) {
     request.predicate = activeFolderPredicate();
     NSError *error = nil;
     NSArray *folders = [viewContext executeFetchRequest:request error:&error];
-    if (error) errorExit([NSString stringWithFormat:@"Failed to fetch folders: %@", error]);
+    if (error) {
+        checkNotesAccessError(error);
+        errorExit([NSString stringWithFormat:@"Failed to fetch folders: %@", error]);
+    }
     return folders;
 }
 
@@ -108,7 +162,10 @@ static NSArray *fetchNotes(id viewContext, NSString *folderName, NSUInteger limi
     if (limit > 0) request.fetchLimit = limit;
     NSError *error = nil;
     NSArray *notes = [viewContext executeFetchRequest:request error:&error];
-    if (error) errorExit([NSString stringWithFormat:@"Failed to fetch notes: %@", error]);
+    if (error) {
+        checkNotesAccessError(error);
+        errorExit([NSString stringWithFormat:@"Failed to fetch notes: %@", error]);
+    }
     return notes;
 }
 
@@ -125,7 +182,11 @@ static NSArray *findNotes(id viewContext, NSString *title, NSString *folderName)
     request.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:predicates];
     NSError *error = nil;
     NSArray *notes = [viewContext executeFetchRequest:request error:&error];
-    if (error || notes.count == 0) return @[];
+    if (error) {
+        checkNotesAccessError(error);
+        errorExit([NSString stringWithFormat:@"Failed to find notes: %@", error]);
+    }
+    if (notes.count == 0) return @[];
     return notes;
 }
 
@@ -161,7 +222,11 @@ static id findNoteByID(id viewContext, NSString *identifier) {
     request.fetchLimit = 1;
     NSError *error = nil;
     NSArray *notes = [viewContext executeFetchRequest:request error:&error];
-    if (error || notes.count == 0) return nil;
+    if (error) {
+        checkNotesAccessError(error);
+        errorExit([NSString stringWithFormat:@"Failed to find note by ID: %@", error]);
+    }
+    if (notes.count == 0) return nil;
     return notes[0];
 }
 // Returns the character offset where the body starts in the full mergeableString
@@ -806,7 +871,10 @@ static int cmdSearch(id viewContext, NSString *query, NSString *folderName) {
     request.fetchLimit = 20;
     NSError *error = nil;
     NSArray *notes = [viewContext executeFetchRequest:request error:&error];
-    if (error) errorExit([NSString stringWithFormat:@"Search error: %@", error]);
+    if (error) {
+        checkNotesAccessError(error);
+        errorExit([NSString stringWithFormat:@"Search error: %@", error]);
+    }
     NSMutableArray *result = [NSMutableArray array];
     for (id note in notes) {
         [result addObject:noteToDict(note)];

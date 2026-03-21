@@ -4058,6 +4058,75 @@ static int cmdTest(id viewContext) {
         } else { fprintf(stderr, "  FAIL (folder not found to delete)\n"); failed++; }
     }
 
+    // --- Permission error detection tests ---
+
+    // Test: errorChainContains detects top-level error
+    {
+        fprintf(stderr, "errorChainContains: top-level match...");
+        NSError *err = [NSError errorWithDomain:@"NSCocoaErrorDomain" code:256 userInfo:nil];
+        if (errorChainContains(err, @"NSCocoaErrorDomain", 256)) {
+            fprintf(stderr, "  PASS\n"); passed++;
+        } else { fprintf(stderr, "  FAIL\n"); failed++; }
+    }
+
+    // Test: errorChainContains detects nested underlying error
+    {
+        fprintf(stderr, "errorChainContains: nested underlying error...");
+        NSError *inner = [NSError errorWithDomain:@"NSSQLiteErrorDomain" code:23 userInfo:nil];
+        NSError *outer = [NSError errorWithDomain:@"NSCocoaErrorDomain" code:256
+            userInfo:@{@"NSUnderlyingError": inner}];
+        if (errorChainContains(outer, @"NSSQLiteErrorDomain", 23)) {
+            fprintf(stderr, "  PASS\n"); passed++;
+        } else { fprintf(stderr, "  FAIL\n"); failed++; }
+    }
+
+    // Test: errorChainContains detects error in NSDetailedErrors array
+    {
+        fprintf(stderr, "errorChainContains: detailed errors array...");
+        NSError *detail = [NSError errorWithDomain:@"NSSQLiteErrorDomain" code:23 userInfo:nil];
+        NSError *outer = [NSError errorWithDomain:@"NSCocoaErrorDomain" code:1560
+            userInfo:@{@"NSDetailedErrors": @[detail]}];
+        if (errorChainContains(outer, @"NSSQLiteErrorDomain", 23)) {
+            fprintf(stderr, "  PASS\n"); passed++;
+        } else { fprintf(stderr, "  FAIL\n"); failed++; }
+    }
+
+    // Test: errorChainContains returns NO for non-matching error
+    {
+        fprintf(stderr, "errorChainContains: no match...");
+        NSError *err = [NSError errorWithDomain:@"SomeOtherDomain" code:42 userInfo:nil];
+        if (!errorChainContains(err, @"NSCocoaErrorDomain", 256)) {
+            fprintf(stderr, "  PASS\n"); passed++;
+        } else { fprintf(stderr, "  FAIL\n"); failed++; }
+    }
+
+    // Test: checkNotesAccessError returns NO for unrelated errors
+    {
+        fprintf(stderr, "checkNotesAccessError: unrelated error returns NO...");
+        NSError *err = [NSError errorWithDomain:@"SomeOtherDomain" code:42 userInfo:nil];
+        if (!checkNotesAccessError(err)) {
+            fprintf(stderr, "  PASS\n"); passed++;
+        } else { fprintf(stderr, "  FAIL\n"); failed++; }
+    }
+
+    // Test: checkNotesAccessError returns NO for nil
+    {
+        fprintf(stderr, "checkNotesAccessError: nil returns NO...");
+        if (!checkNotesAccessError(nil)) {
+            fprintf(stderr, "  PASS\n"); passed++;
+        } else { fprintf(stderr, "  FAIL\n"); failed++; }
+    }
+
+    // Test: checkNotesAccessError returns NO for 4097 without permission keywords
+    {
+        fprintf(stderr, "checkNotesAccessError: 4097 without permission keywords returns NO...");
+        NSError *err = [NSError errorWithDomain:@"NSCocoaErrorDomain" code:4097
+            userInfo:@{NSLocalizedDescriptionKey: @"XPC connection interrupted"}];
+        if (!checkNotesAccessError(err)) {
+            fprintf(stderr, "  PASS\n"); passed++;
+        } else { fprintf(stderr, "  FAIL\n"); failed++; }
+    }
+
     fprintf(stderr, "\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
 }

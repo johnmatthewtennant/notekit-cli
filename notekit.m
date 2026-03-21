@@ -29,7 +29,9 @@ int main(int argc, const char *argv[]) {
 
         for (int i = 2; i < argc; i++) {
             NSString *arg = [NSString stringWithUTF8String:argv[i]];
-            if ([arg hasPrefix:@"--"]) {
+            if ([arg isEqualToString:@"-h"]) {
+                opts[@"help"] = @"true";
+            } else if ([arg hasPrefix:@"--"]) {
                 NSString *flag = [arg substringFromIndex:2];
                 if ([flag isEqualToString:@"help"] ||
                     [flag isEqualToString:@"claude"] ||
@@ -50,6 +52,20 @@ int main(int argc, const char *argv[]) {
 
         // Handle --help before loading frameworks
         if ([opts[@"help"] isEqualToString:@"true"]) { usage(); return 0; }
+
+        // Validate command name before loading frameworks
+        NSSet *knownCommands = [NSSet setWithObjects:
+            @"folders", @"list", @"get", @"read", @"read-attrs", @"read-structured",
+            @"read-markdown", @"write-markdown", @"set-attr", @"move", @"search",
+            @"pin", @"unpin", @"duplicate", @"create-folder", @"delete-folder",
+            @"create-empty", @"create", @"delete", @"append", @"insert",
+            @"delete-range", @"search-offset", @"replace", @"delete-line",
+            @"get-link", @"add-link", @"add-note-link", @"install-skill", @"test", nil];
+        if (![knownCommands containsObject:command]) {
+            fprintf(stderr, "Unknown command: %s\n", [command UTF8String]);
+            usage();
+            return 1;
+        }
 
         // Handle commands that don't need Notes/CoreData access
         if ([command isEqualToString:@"install-skill"]) {
@@ -295,6 +311,7 @@ int main(int argc, const char *argv[]) {
             return cmdTest(viewContext);
 
         } else {
+            // Should not reach here — unknown commands are caught above
             fprintf(stderr, "Unknown command: %s\n", [command UTF8String]);
             usage();
             return 1;

@@ -67,6 +67,16 @@ int main(int argc, const char *argv[]) {
             return 1;
         }
 
+        // Reject unexpected positional arguments before loading frameworks
+        if (positional.count > 0 &&
+            ![command isEqualToString:@"folders"] &&
+            ![command isEqualToString:@"install-skill"] &&
+            ![command isEqualToString:@"test"]) {
+            fprintf(stderr, "Error: unexpected argument '%s'. All arguments must use --flag syntax.\n", [positional[0] UTF8String]);
+            usage();
+            return 1;
+        }
+
         // Handle commands that don't need Notes/CoreData access
         if ([command isEqualToString:@"install-skill"]) {
             BOOL wantClaude = [opts[@"claude"] isEqualToString:@"true"];
@@ -91,15 +101,6 @@ int main(int argc, const char *argv[]) {
 
         NSString *folderName = opts[@"folder"];
         id viewContext = getViewContext();
-
-        // Reject unexpected positional arguments
-        if (positional.count > 0 &&
-            ![command isEqualToString:@"folders"] &&
-            ![command isEqualToString:@"test"]) {
-            fprintf(stderr, "Error: unexpected argument '%s'. All arguments must use --flag syntax.\n", [positional[0] UTF8String]);
-            usage();
-            return 1;
-        }
 
         if ([command isEqualToString:@"folders"]) {
             return cmdFolders(viewContext);

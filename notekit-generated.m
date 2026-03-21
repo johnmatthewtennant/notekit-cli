@@ -18,6 +18,8 @@ static void loadFramework(void) {
     ICTTAttachmentClass = NSClassFromString(@"ICTTAttachment");
 }
 
+static void printAccessDeniedGuidance(void); // forward declaration
+
 static id getViewContext(void) {
     ((void (*)(id, SEL, NSUInteger))objc_msgSend)(ICNoteContextClass, sel_registerName("startSharedContextWithOptions:"), 0);
     id context = ((id (*)(id, SEL))objc_msgSend)(ICNoteContextClass, sel_registerName("sharedContext"));
@@ -29,15 +31,9 @@ static id getViewContext(void) {
     id coordinator = ((id (*)(id, SEL))objc_msgSend)(container, sel_registerName("persistentStoreCoordinator"));
     NSArray *stores = ((id (*)(id, SEL))objc_msgSend)(coordinator, sel_registerName("persistentStores"));
     if (!stores || stores.count == 0) {
-        fprintf(stderr, "\nError: Notes access denied.\n\n");
-        fprintf(stderr, "notekit requires Full Disk Access to read Apple Notes.\n\n");
-        fprintf(stderr, "1. Open System Settings > Privacy & Security > Full Disk Access\n");
-        fprintf(stderr, "2. Add your terminal app (e.g. iTerm, Terminal, Ghostty)\n\n");
-        fprintf(stderr, "If you previously denied access, reset and re-grant:\n");
-        fprintf(stderr, "   tccutil reset SystemPolicyAllFiles <bundle-id>\n\n");
-        fprintf(stderr, "   Find your terminal's bundle ID:\n");
-        fprintf(stderr, "   osascript -e 'id of app \"iTerm\"'  (replace iTerm with your terminal app name)\n\n");
-        fprintf(stderr, "Then retry: notekit folders\n");
+        fprintf(stderr, "\nError: Could not open Apple Notes database.\n");
+        fprintf(stderr, "The most common cause is missing Full Disk Access.\n\n");
+        printAccessDeniedGuidance();
         exit(1);
     }
     return ((id (*)(id, SEL))objc_msgSend)(container, sel_registerName("viewContext"));
@@ -48,6 +44,21 @@ static id getViewContext(void) {
 static void errorExit(NSString *msg) {
     fprintf(stderr, "Error: %s\n", [msg UTF8String]);
     exit(1);
+}
+
+// Print Full Disk Access troubleshooting guidance to stderr.
+// Shared by checkNotesAccessError (fetch-time errors) and getViewContext
+// (store-load failures) to keep the message in one place.
+static void printAccessDeniedGuidance(void) {
+    fprintf(stderr, "notekit requires Full Disk Access to read Apple Notes.\n\n");
+    fprintf(stderr, "1. Open System Settings > Privacy & Security > Full Disk Access\n");
+    fprintf(stderr, "2. Add your terminal app (e.g. iTerm, Terminal, Ghostty)\n\n");
+    fprintf(stderr, "If you previously denied access, reset and re-grant:\n");
+    fprintf(stderr, "   tccutil reset SystemPolicyAllFiles <bundle-id>\n");
+    fprintf(stderr, "   (Note: this resets the Full Disk Access prompt for that app)\n\n");
+    fprintf(stderr, "   Find your terminal's bundle ID:\n");
+    fprintf(stderr, "   osascript -e 'id of app \"iTerm\"'  (replace iTerm with your terminal app name)\n\n");
+    fprintf(stderr, "Then retry: notekit folders\n");
 }
 
 // Recursively check an NSError chain for a specific domain+code pair.
@@ -89,14 +100,7 @@ static BOOL checkNotesAccessError(NSError *error) {
     if (!isSandbox && !isPermDenied) return NO;
 
     fprintf(stderr, "Error: Notes access denied.\n\n");
-    fprintf(stderr, "notekit requires Full Disk Access to read Apple Notes.\n\n");
-    fprintf(stderr, "1. Open System Settings > Privacy & Security > Full Disk Access\n");
-    fprintf(stderr, "2. Add your terminal app (e.g. iTerm, Terminal, Ghostty)\n\n");
-    fprintf(stderr, "If you previously denied access, reset and re-grant:\n");
-    fprintf(stderr, "   tccutil reset SystemPolicyAllFiles <bundle-id>\n\n");
-    fprintf(stderr, "   Find your terminal's bundle ID:\n");
-    fprintf(stderr, "   osascript -e 'id of app \"iTerm\"'  (replace iTerm with your terminal app name)\n\n");
-    fprintf(stderr, "Then retry: notekit folders\n");
+    printAccessDeniedGuidance();
     exit(1);
     return YES; // unreachable, silences compiler warning
 }

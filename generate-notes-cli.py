@@ -88,20 +88,40 @@ static void errorExit(NSString *msg) {
     exit(1);
 }
 
+// Recursively check an NSError chain for a specific domain+code pair.
+// Inspects the error itself, NSUnderlyingError, and NSDetailedErrors.
+static BOOL errorChainContains(NSError *error, NSString *domain, NSInteger code) {
+    if (!error) return NO;
+    if ([[error domain] isEqualToString:domain] && [error code] == code) return YES;
+    // Check single underlying error
+    NSError *underlying = [[error userInfo] objectForKey:@"NSUnderlyingError"];
+    if (errorChainContains(underlying, domain, code)) return YES;
+    // Check detailed errors array (Core Data batch errors)
+    NSArray *detailed = [[error userInfo] objectForKey:@"NSDetailedErrors"];
+    for (NSError *detail in detailed) {
+        if (errorChainContains(detail, domain, code)) return YES;
+    }
+    return NO;
+}
+
 // Check if a Core Data error is a permission/sandbox denial and print
 // actionable troubleshooting steps. Returns YES if it handled the error
 // (and exited), NO if the error is unrelated to permissions.
 static BOOL checkNotesAccessError(NSError *error) {
     if (!error) return NO;
     // NSCocoaErrorDomain 256 = NSFileReadNoPermissionError (sandbox / Full Disk Access)
-    // NSCocoaErrorDomain 4097 = NSXPCConnectionInterrupted (permission denied)
-    BOOL isSandbox = [[error domain] isEqualToString:@"NSCocoaErrorDomain"] && [error code] == 256;
-    BOOL isPermDenied = [[error domain] isEqualToString:@"NSCocoaErrorDomain"] && [error code] == 4097;
-    // Also check underlying errors — Core Data wraps SQLite errors
-    NSError *underlying = [[error userInfo] objectForKey:@"NSUnderlyingError"];
-    if (underlying) {
-        if ([[underlying domain] isEqualToString:@"NSSQLiteErrorDomain"] && [underlying code] == 23) {
-            isSandbox = YES; // SQLITE_AUTH
+    BOOL isSandbox = errorChainContains(error, @"NSCocoaErrorDomain", 256);
+    // NSSQLiteErrorDomain 23 = SQLITE_AUTH (sandbox denied at SQLite level)
+    if (!isSandbox) isSandbox = errorChainContains(error, @"NSSQLiteErrorDomain", 23);
+    // NSCocoaErrorDomain 4097 = NSXPCConnectionInterrupted — only treat as
+    // permission denied when the description mentions access/permission to
+    // avoid false positives from transient XPC failures.
+    BOOL isPermDenied = NO;
+    if (errorChainContains(error, @"NSCocoaErrorDomain", 4097)) {
+        NSString *desc = [[error localizedDescription] lowercaseString];
+        if ([desc containsString:@"permission"] || [desc containsString:@"denied"] ||
+            [desc containsString:@"access"]) {
+            isPermDenied = YES;
         }
     }
     if (!isSandbox && !isPermDenied) return NO;
@@ -222,7 +242,7 @@ static NSArray *findNotes(id viewContext, NSString *title, NSString *folderName)
     NSArray *notes = [viewContext executeFetchRequest:request error:&error];
     if (error) {
         checkNotesAccessError(error);
-        return @[];
+        errorExit([NSString stringWithFormat:@"Failed to find notes: %@", error]);
     }
     if (notes.count == 0) return @[];
     return notes;
@@ -262,7 +282,7 @@ static id findNoteByID(id viewContext, NSString *identifier) {
     NSArray *notes = [viewContext executeFetchRequest:request error:&error];
     if (error) {
         checkNotesAccessError(error);
-        return nil;
+        errorExit([NSString stringWithFormat:@"Failed to find note by ID: %@", error]);
     }
     if (notes.count == 0) return nil;
     return notes[0];

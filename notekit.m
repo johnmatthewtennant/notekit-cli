@@ -18,9 +18,10 @@ int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc < 2) { usage(); return 1; }
 
-        loadFramework();
-
         NSString *command = [NSString stringWithUTF8String:argv[1]];
+
+        // Handle --help as first argument (before parsing other flags)
+        if ([command isEqualToString:@"--help"] || [command isEqualToString:@"-h"]) { usage(); return 0; }
 
         // Parse arguments
         NSMutableArray *positional = [NSMutableArray array];
@@ -28,7 +29,9 @@ int main(int argc, const char *argv[]) {
 
         for (int i = 2; i < argc; i++) {
             NSString *arg = [NSString stringWithUTF8String:argv[i]];
-            if ([arg hasPrefix:@"--"]) {
+            if ([arg isEqualToString:@"-h"]) {
+                opts[@"help"] = @"true";
+            } else if ([arg hasPrefix:@"--"]) {
                 NSString *flag = [arg substringFromIndex:2];
                 if ([flag isEqualToString:@"help"] ||
                     [flag isEqualToString:@"claude"] ||
@@ -47,6 +50,46 @@ int main(int argc, const char *argv[]) {
             }
         }
 
+        // Handle --help before loading frameworks
+        if ([opts[@"help"] isEqualToString:@"true"]) { usage(); return 0; }
+
+        // Validate command name before loading frameworks
+        NSSet *knownCommands = [NSSet setWithObjects:
+            @"folders", @"list", @"get", @"read", @"read-attrs", @"read-structured",
+            @"read-markdown", @"write-markdown", @"set-attr", @"move", @"search",
+            @"pin", @"unpin", @"duplicate", @"create-folder", @"delete-folder",
+            @"create-empty", @"create", @"delete", @"append", @"insert",
+            @"delete-range", @"search-offset", @"replace", @"delete-line",
+            @"get-link", @"add-link", @"add-note-link", @"install-skill", @"test", nil];
+        if (![knownCommands containsObject:command]) {
+            fprintf(stderr, "Unknown command: %s\n", [command UTF8String]);
+            usage();
+            return 1;
+        }
+
+        // Reject unexpected positional arguments before loading frameworks
+        if (positional.count > 0 &&
+            ![command isEqualToString:@"folders"] &&
+            ![command isEqualToString:@"install-skill"] &&
+            ![command isEqualToString:@"test"]) {
+            fprintf(stderr, "Error: unexpected argument '%s'. All arguments must use --flag syntax.\n", [positional[0] UTF8String]);
+            usage();
+            return 1;
+        }
+
+        // Handle commands that don't need Notes/CoreData access
+        if ([command isEqualToString:@"install-skill"]) {
+            BOOL wantClaude = [opts[@"claude"] isEqualToString:@"true"];
+            BOOL wantAgents = [opts[@"agents"] isEqualToString:@"true"];
+            BOOL force = [opts[@"force"] isEqualToString:@"true"];
+            // Default: install to both
+            if (!wantClaude && !wantAgents) { wantClaude = YES; wantAgents = YES; }
+            return cmdInstallSkill(wantClaude, wantAgents, force);
+        }
+
+        // Load NotesShared framework and CoreData context (only for commands that need it)
+        loadFramework();
+
         // Resolve keyword args: --title, --name, --text, --query, --search-text, --new-title
         // Keyword args take priority over positional args
         NSString *kwTitle = opts[@"title"];
@@ -58,16 +101,6 @@ int main(int argc, const char *argv[]) {
 
         NSString *folderName = opts[@"folder"];
         id viewContext = getViewContext();
-
-        // Reject unexpected positional arguments
-        if (positional.count > 0 &&
-            ![command isEqualToString:@"folders"] &&
-            ![command isEqualToString:@"install-skill"] &&
-            ![command isEqualToString:@"test"]) {
-            fprintf(stderr, "Error: unexpected argument '%s'. All arguments must use --flag syntax.\n", [positional[0] UTF8String]);
-            usage();
-            return 1;
-        }
 
         if ([command isEqualToString:@"folders"]) {
             return cmdFolders(viewContext);
@@ -275,18 +308,11 @@ int main(int argc, const char *argv[]) {
             NSInteger position = opts[@"position"] ? [opts[@"position"] integerValue] : -1;
             return cmdAddNoteLink(viewContext, opts[@"id"], opts[@"target"], position);
 
-        } else if ([command isEqualToString:@"install-skill"]) {
-            BOOL wantClaude = [opts[@"claude"] isEqualToString:@"true"];
-            BOOL wantAgents = [opts[@"agents"] isEqualToString:@"true"];
-            BOOL force = [opts[@"force"] isEqualToString:@"true"];
-            // Default: install to both
-            if (!wantClaude && !wantAgents) { wantClaude = YES; wantAgents = YES; }
-            return cmdInstallSkill(wantClaude, wantAgents, force);
-
         } else if ([command isEqualToString:@"test"]) {
             return cmdTest(viewContext);
 
         } else {
+            // Should not reach here — unknown commands are caught above
             fprintf(stderr, "Unknown command: %s\n", [command UTF8String]);
             usage();
             return 1;

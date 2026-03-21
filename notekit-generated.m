@@ -22,6 +22,24 @@ static id getViewContext(void) {
     ((void (*)(id, SEL, NSUInteger))objc_msgSend)(ICNoteContextClass, sel_registerName("startSharedContextWithOptions:"), 0);
     id context = ((id (*)(id, SEL))objc_msgSend)(ICNoteContextClass, sel_registerName("sharedContext"));
     id container = ((id (*)(id, SEL))objc_msgSend)(context, sel_registerName("persistentContainer"));
+    // Check if persistent stores loaded — if empty, Core Data could not open
+    // the SQLite database (typically a Full Disk Access / sandbox denial).
+    // Core Data logs errors to stderr but does not propagate an NSError,
+    // so fetch requests succeed with empty results instead of failing.
+    id coordinator = ((id (*)(id, SEL))objc_msgSend)(container, sel_registerName("persistentStoreCoordinator"));
+    NSArray *stores = ((id (*)(id, SEL))objc_msgSend)(coordinator, sel_registerName("persistentStores"));
+    if (!stores || stores.count == 0) {
+        fprintf(stderr, "\nError: Notes access denied.\n\n");
+        fprintf(stderr, "notekit requires Full Disk Access to read Apple Notes.\n\n");
+        fprintf(stderr, "1. Open System Settings > Privacy & Security > Full Disk Access\n");
+        fprintf(stderr, "2. Add your terminal app (e.g. iTerm, Terminal, Ghostty)\n\n");
+        fprintf(stderr, "If you previously denied access, reset and re-grant:\n");
+        fprintf(stderr, "   tccutil reset SystemPolicyAllFiles <bundle-id>\n\n");
+        fprintf(stderr, "   Find your terminal's bundle ID:\n");
+        fprintf(stderr, "   osascript -e 'id of app \"iTerm\"'  (replace iTerm with your terminal app name)\n\n");
+        fprintf(stderr, "Then retry: notekit folders\n");
+        exit(1);
+    }
     return ((id (*)(id, SEL))objc_msgSend)(container, sel_registerName("viewContext"));
 }
 

@@ -4100,6 +4100,24 @@ static int cmdTest(id viewContext) {
         } else { fprintf(stderr, "  FAIL\n"); failed++; }
     }
 
+    // Test: fdaTroubleshootingText contains agent instructions
+    {
+        fprintf(stderr, "fdaTroubleshootingText: contains agent instructions...");
+        NSString *text = fdaTroubleshootingText();
+        BOOL hasAgentHeader = [text containsString:@"coding agent helping the user"];
+        BOOL hasBundleId = [text containsString:@"osascript -e 'id of app"];
+        BOOL hasTccutil = [text containsString:@"tccutil reset SystemPolicyAllFiles"];
+        BOOL hasOpenSettings = [text containsString:@"x-apple.systempreferences"];
+        BOOL hasIDEMention = [text containsString:@"Cursor, VS Code"];
+        if (hasAgentHeader && hasBundleId && hasTccutil && hasOpenSettings && hasIDEMention) {
+            fprintf(stderr, "  PASS\n"); passed++;
+        } else {
+            fprintf(stderr, "  FAIL (header=%d, bundle=%d, tccutil=%d, settings=%d, ide=%d)\n",
+                hasAgentHeader, hasBundleId, hasTccutil, hasOpenSettings, hasIDEMention);
+            failed++;
+        }
+    }
+
     // Test: checkNotesAccessError returns NO for unrelated errors
     {
         fprintf(stderr, "checkNotesAccessError: unrelated error returns NO...");

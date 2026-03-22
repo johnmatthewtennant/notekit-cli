@@ -32,7 +32,13 @@ static id getViewContext(void) {
     NSArray *stores = ((id (*)(id, SEL))objc_msgSend)(coordinator, sel_registerName("persistentStores"));
     if (!stores || stores.count == 0) {
         fprintf(stderr, "\nError: Could not open Apple Notes database.\n");
-        fprintf(stderr, "The most common cause is missing Full Disk Access.\n\n");
+        fprintf(stderr, "Diagnostics: container=%s, coordinator=%s, stores=%s\n",
+            container ? "ok" : "nil", coordinator ? "ok" : "nil",
+            stores ? [[NSString stringWithFormat:@"empty(%lu)", (unsigned long)stores.count] UTF8String] : "nil");
+        fprintf(stderr, "\nPossible causes:\n");
+        fprintf(stderr, "  - Missing Full Disk Access (most common)\n");
+        fprintf(stderr, "  - Corrupted Notes database\n");
+        fprintf(stderr, "  - Core Data initialization failure\n\n");
         printAccessDeniedGuidance();
         exit(1);
     }

@@ -67,12 +67,14 @@ static void printFDATroubleshootingSteps(void) {
     fprintf(stderr, "     open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n\n");
     fprintf(stderr, "Then retry: notekit folders\n\n");
     fprintf(stderr, "If you are a coding agent helping the user:\n");
-    fprintf(stderr, "  1. Find the terminal bundle ID:\n");
+    fprintf(stderr, "  1. Find the host app bundle ID (terminal or IDE that runs notekit):\n");
     fprintf(stderr, "     osascript -e 'id of app \"Terminal\"'\n");
-    fprintf(stderr, "     (replace Terminal with the user's terminal app)\n");
-    fprintf(stderr, "  2. Open the Full Disk Access pane directly:\n");
+    fprintf(stderr, "     (replace Terminal with the actual app: iTerm, Ghostty, Cursor, VS Code, etc.)\n");
+    fprintf(stderr, "  2. Reset prior denial (if user previously clicked Don't Allow):\n");
+    fprintf(stderr, "     tccutil reset SystemPolicyAllFiles <bundle-id>\n");
+    fprintf(stderr, "  3. Open the Full Disk Access pane:\n");
     fprintf(stderr, "     open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n");
-    fprintf(stderr, "  3. Ask the user to add their terminal app, then retry.\n");
+    fprintf(stderr, "  4. Ask the user to toggle their app ON in the list, then retry.\n");
 }
 
 // Recursively check an NSError chain for a specific domain+code pair.

@@ -56,13 +56,15 @@ static void errorExit(NSString *msg) {
 // Print Full Disk Access troubleshooting steps to stderr (no preamble).
 // Callers provide their own context before calling this.
 static void printFDATroubleshootingSteps(void) {
-    fprintf(stderr, "  1. Open System Settings > Privacy & Security > Full Disk Access\n");
-    fprintf(stderr, "  2. Add your terminal app (e.g. iTerm, Terminal, Ghostty)\n\n");
-    fprintf(stderr, "If you previously denied access, reset and re-grant:\n");
-    fprintf(stderr, "   tccutil reset SystemPolicyAllFiles <bundle-id>\n");
-    fprintf(stderr, "   (Note: this resets the Full Disk Access prompt for that app)\n\n");
+    fprintf(stderr, "  1. Open Full Disk Access settings (run this command):\n");
+    fprintf(stderr, "     open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n\n");
+    fprintf(stderr, "  2. Add your terminal app (e.g. iTerm, Terminal, Ghostty) and toggle it ON\n\n");
+    fprintf(stderr, "If you previously denied access, reset first:\n");
+    fprintf(stderr, "   tccutil reset SystemPolicyAllFiles <bundle-id>\n\n");
     fprintf(stderr, "   Find your terminal's bundle ID:\n");
     fprintf(stderr, "   osascript -e 'id of app \"iTerm\"'  (replace iTerm with your terminal app name)\n\n");
+    fprintf(stderr, "   Then re-open settings and toggle your terminal ON:\n");
+    fprintf(stderr, "     open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n\n");
     fprintf(stderr, "Then retry: notekit folders\n");
 }
 

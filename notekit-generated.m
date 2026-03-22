@@ -65,7 +65,14 @@ static void printFDATroubleshootingSteps(void) {
     fprintf(stderr, "   osascript -e 'id of app \"iTerm\"'  (replace iTerm with your terminal app name)\n\n");
     fprintf(stderr, "   Then re-open settings and toggle your terminal ON:\n");
     fprintf(stderr, "     open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n\n");
-    fprintf(stderr, "Then retry: notekit folders\n");
+    fprintf(stderr, "Then retry: notekit folders\n\n");
+    fprintf(stderr, "If you are a coding agent helping the user:\n");
+    fprintf(stderr, "  1. Find the terminal bundle ID:\n");
+    fprintf(stderr, "     osascript -e 'id of app \"Terminal\"'\n");
+    fprintf(stderr, "     (replace Terminal with the user's terminal app)\n");
+    fprintf(stderr, "  2. Open the Full Disk Access pane directly:\n");
+    fprintf(stderr, "     open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n");
+    fprintf(stderr, "  3. Ask the user to add their terminal app, then retry.\n");
 }
 
 // Recursively check an NSError chain for a specific domain+code pair.

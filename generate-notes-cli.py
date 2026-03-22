@@ -71,7 +71,7 @@ def generate_framework_loading():
         lines.append(f'    {cls}Class = NSClassFromString(@"{cls}");')
     lines.append('}')
     lines.append('')
-    lines.append('static void printAccessDeniedGuidance(void); // forward declaration')
+    lines.append('static void printFDATroubleshootingSteps(void); // forward declaration')
     lines.append('')
     lines.append('static id getViewContext(void) {')
     lines.append('    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(ICNoteContextClass, sel_registerName("startSharedContextWithOptions:"), 0);')
@@ -92,7 +92,8 @@ def generate_framework_loading():
     lines.append('        fprintf(stderr, "  - Missing Full Disk Access (most common)\\n");')
     lines.append('        fprintf(stderr, "  - Corrupted Notes database\\n");')
     lines.append('        fprintf(stderr, "  - Core Data initialization failure\\n\\n");')
-    lines.append('        printAccessDeniedGuidance();')
+    lines.append('        fprintf(stderr, "If Full Disk Access is missing, try:\\n");')
+    lines.append('        printFDATroubleshootingSteps();')
     lines.append('        exit(1);')
     lines.append('    }')
     lines.append('    return ((id (*)(id, SEL))objc_msgSend)(container, sel_registerName("viewContext"));')
@@ -108,13 +109,11 @@ static void errorExit(NSString *msg) {
     exit(1);
 }
 
-// Print Full Disk Access troubleshooting guidance to stderr.
-// Shared by checkNotesAccessError (fetch-time errors) and getViewContext
-// (store-load failures) to keep the message in one place.
-static void printAccessDeniedGuidance(void) {
-    fprintf(stderr, "notekit requires Full Disk Access to read Apple Notes.\\n\\n");
-    fprintf(stderr, "1. Open System Settings > Privacy & Security > Full Disk Access\\n");
-    fprintf(stderr, "2. Add your terminal app (e.g. iTerm, Terminal, Ghostty)\\n\\n");
+// Print Full Disk Access troubleshooting steps to stderr (no preamble).
+// Callers provide their own context before calling this.
+static void printFDATroubleshootingSteps(void) {
+    fprintf(stderr, "  1. Open System Settings > Privacy & Security > Full Disk Access\\n");
+    fprintf(stderr, "  2. Add your terminal app (e.g. iTerm, Terminal, Ghostty)\\n\\n");
     fprintf(stderr, "If you previously denied access, reset and re-grant:\\n");
     fprintf(stderr, "   tccutil reset SystemPolicyAllFiles <bundle-id>\\n");
     fprintf(stderr, "   (Note: this resets the Full Disk Access prompt for that app)\\n\\n");
@@ -162,7 +161,8 @@ static BOOL checkNotesAccessError(NSError *error) {
     if (!isSandbox && !isPermDenied) return NO;
 
     fprintf(stderr, "Error: Notes access denied.\\n\\n");
-    printAccessDeniedGuidance();
+    fprintf(stderr, "notekit requires Full Disk Access to read Apple Notes.\\n");
+    printFDATroubleshootingSteps();
     exit(1);
     return YES; // unreachable, silences compiler warning
 }

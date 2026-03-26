@@ -271,6 +271,7 @@ static NSArray *fetchNotes(id viewContext, NSString *folderName, NSUInteger limi
 }
 
 static NSDictionary *noteToDict(id note); // forward declaration
+static NSString *noteToMarkdownString(id note); // forward declaration (defined in notekit-handwritten.m)
 
 static NSArray *findNotes(id viewContext, NSString *title, NSString *folderName) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
@@ -910,7 +911,7 @@ static int cmdSetAttr(id viewContext, NSString *identifier,
     [viewContext save:&error];
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 
-    printJSON(@{@"id": identifier, @"offset": @(offset), @"length": @(length), @"updated": @YES});
+    printJSON(@{@"id": identifier, @"offset": @(offset), @"length": @(length), @"updated": @YES, @"content": noteToMarkdownString(note)});
     return 0;
 }
 

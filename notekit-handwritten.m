@@ -1,3 +1,6 @@
+// Forward declaration: defined later in this file, used by write commands for readback
+static NSString *noteToMarkdownString(id note);
+
 static int cmdCreateEmpty(id viewContext, NSString *folderName) {
     id targetFolder = nil;
     NSArray *folders = fetchFolders(viewContext);

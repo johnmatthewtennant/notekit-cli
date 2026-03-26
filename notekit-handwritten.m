@@ -15,7 +15,9 @@ static int cmdCreateEmpty(id viewContext, NSString *folderName) {
     [viewContext save:&error];
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 
-    printJSON(noteToDict(note));
+    NSMutableDictionary *result = [noteToDict(note) mutableCopy];
+    result[@"content"] = noteToMarkdownString(note);
+    printJSON(result);
     return 0;
 }
 
@@ -87,7 +89,9 @@ static int cmdCreate(id viewContext, NSString *folderName, NSString *title, NSSt
 
     NSInteger delta = (NSInteger)(currentLen - oldLen);
     saveNote(note, viewContext, currentLen, delta);
-    printJSON(noteToDict(note));
+    NSMutableDictionary *result = [noteToDict(note) mutableCopy];
+    result[@"content"] = noteToMarkdownString(note);
+    printJSON(result);
     return 0;
 }
 
@@ -113,7 +117,7 @@ static int cmdAppend(id viewContext, NSString *identifier, NSString *text, NSInt
         @{@"TTStyle": paraStyle}, NSMakeRange(oldLen + 1, text.length));
 
     saveNote(note, viewContext, oldLen + toInsert.length, toInsert.length);
-    printJSON(@{@"id": identifier, @"appended": text});
+    printJSON(@{@"id": identifier, @"appended": text, @"content": noteToMarkdownString(note)});
     return 0;
 }
 
@@ -147,7 +151,7 @@ static int cmdInsert(id viewContext, NSString *identifier, NSString *text, NSUIn
         @{@"TTStyle": paraStyle}, NSMakeRange(position, text.length));
 
     saveNote(note, viewContext, oldLen + text.length, text.length);
-    printJSON(@{@"id": identifier, @"inserted": text, @"position": @(position)});
+    printJSON(@{@"id": identifier, @"inserted": text, @"position": @(position), @"content": noteToMarkdownString(note)});
     return 0;
 }
 
@@ -176,7 +180,7 @@ static int cmdDeleteRange(id viewContext, NSString *identifier, NSUInteger start
     ((void (*)(id, SEL, NSRange))objc_msgSend)(ms, sel_registerName("deleteCharactersInRange:"), NSMakeRange(start, length));
 
     saveNote(note, viewContext, oldLen - length, -(NSInteger)length);
-    printJSON(@{@"id": identifier, @"deleted_range": @{@"start": @(start), @"length": @(length)}});
+    printJSON(@{@"id": identifier, @"deleted_range": @{@"start": @(start), @"length": @(length)}, @"content": noteToMarkdownString(note)});
     return 0;
 }
 
@@ -229,7 +233,7 @@ static int cmdReplace(id viewContext, NSString *identifier, NSString *search, NS
     NSUInteger newLen = fullText.length - search.length + replacement.length;
     NSInteger delta = (NSInteger)replacement.length - (NSInteger)search.length;
     saveNote(note, viewContext, newLen, delta);
-    printJSON(@{@"id": identifier, @"replaced": search, @"with": replacement});
+    printJSON(@{@"id": identifier, @"replaced": search, @"with": replacement, @"content": noteToMarkdownString(note)});
     return 0;
 }
 
@@ -275,7 +279,7 @@ static int cmdDeleteLine(id viewContext, NSString *identifier, NSString *searchT
     ((void (*)(id, SEL, NSRange))objc_msgSend)(ms, sel_registerName("deleteCharactersInRange:"), NSMakeRange(paraStart, deleteLen));
 
     saveNote(note, viewContext, length - deleteLen, -(NSInteger)deleteLen);
-    printJSON(@{@"id": identifier, @"deletedLine": searchText, @"offset": @(paraStart), @"length": @(deleteLen)});
+    printJSON(@{@"id": identifier, @"deletedLine": searchText, @"offset": @(paraStart), @"length": @(deleteLen), @"content": noteToMarkdownString(note)});
     return 0;
 }
 
@@ -749,7 +753,8 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
     return output;
 }
 
-static int cmdReadMarkdownNote(id note) {
+// Helper: get a note's content as a markdown string (for readback after writes)
+static NSString *noteToMarkdownString(id note) {
     NSArray *model = noteToParaModel(note);
 
     // Skip leading empty paragraphs (from canonical leading \n)
@@ -762,7 +767,11 @@ static int cmdReadMarkdownNote(id note) {
         [filtered addObject:para];
     }
 
-    NSString *markdown = paraModelToMarkdown(filtered);
+    return paraModelToMarkdown(filtered);
+}
+
+static int cmdReadMarkdownNote(id note) {
+    NSString *markdown = noteToMarkdownString(note);
     printf("%s\n", [markdown UTF8String]);
     return 0;
 }
@@ -1596,11 +1605,12 @@ static int cmdWriteMarkdownFullReplace(id note, id viewContext, NSString *identi
         errorExit([NSString stringWithFormat:@"Save error: %@", error]);
     }
 
-    // Print summary
+    // Print summary with readback
     NSMutableDictionary *summary = [NSMutableDictionary dictionary];
     summary[@"id"] = identifier;
     summary[@"mode"] = @"replace";
     summary[@"paragraphsWritten"] = @(newModel.count);
+    summary[@"content"] = noteToMarkdownString(note);
     printJSON(summary);
     return 0;
 }
@@ -1951,6 +1961,7 @@ static int cmdWriteMarkdownDiff(id note, id viewContext, NSString *identifier,
         errorExit([NSString stringWithFormat:@"Save error: %@", error]);
     }
 
+    summary[@"content"] = noteToMarkdownString(note);
     printJSON(summary);
     return 0;
 }

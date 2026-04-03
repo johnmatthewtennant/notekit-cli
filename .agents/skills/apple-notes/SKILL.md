@@ -10,7 +10,7 @@ Command-line interface for Apple Notes. Built on the private NotesShared framewo
 
 ## Reading and writing notes
 
-Use `read-markdown` / `write-markdown` for all note operations. `write-markdown` does paragraph-level LCS diffing internally — only mutated paragraphs are changed. Markdown covers headings, bold, italic, strikethrough, links, code, lists, checklists, and note-to-note links.
+Use `read-markdown` / `write-markdown` for all note operations. With `--diff`, `write-markdown` does paragraph-level LCS diffing — only mutated paragraphs are changed. Markdown covers headings, bold, italic, strikethrough, links, code, lists, checklists, and note-to-note links. Primitive commands (see "Debugging / Internals" in `--help`) exist for edge cases not covered by markdown syntax.
 
 - `notekit read-markdown --title "Title"` — read a note as markdown
 - `notekit read-markdown --id <id>` — read a note as markdown by ID

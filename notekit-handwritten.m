@@ -2083,11 +2083,11 @@ static int cmdInstallSkill(BOOL installClaude, BOOL installAgents, BOOL force) {
 static void usage(void) {
     fprintf(stderr, "notekit — read and edit Apple Notes via the NotesShared framework\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "Use read-markdown/write-markdown for all note operations. write-markdown does\n");
-    fprintf(stderr, "paragraph-level LCS diffing internally — it only mutates paragraphs that changed.\n");
-    fprintf(stderr, "Markdown supports headings, bold, italic, strikethrough, links, code, lists,\n");
-    fprintf(stderr, "checklists, and note-to-note links. Primitives exist only for debugging/inspecting\n");
-    fprintf(stderr, "the raw attribute stream.\n");
+    fprintf(stderr, "Use read-markdown/write-markdown for all note operations. With --diff,\n");
+    fprintf(stderr, "write-markdown does paragraph-level LCS diffing — it only mutates paragraphs\n");
+    fprintf(stderr, "that changed. Markdown supports headings, bold, italic, strikethrough, links,\n");
+    fprintf(stderr, "code, lists, checklists, and note-to-note links. Primitives exist for edge\n");
+    fprintf(stderr, "cases not covered by markdown syntax.\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Reading and writing notes (recommended):\n");
     fprintf(stderr, "  notekit read-markdown (--title <title> | --id <id>) [--folder <name>]\n");

@@ -221,10 +221,10 @@ int main(int argc, const char *argv[]) {
             NSInteger styleVal = -1;
             if (opts[@"style"]) {
                 if (!isStrictInteger(opts[@"style"], &styleVal)) {
-                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 2=subheading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
                 }
                 if (!isValidStyle(styleVal)) {
-                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
+                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 2=subheading, 3=body, 100=dash-list, 102=numbered-list, 103=checklist");
                 }
             }
             return cmdCreate(viewContext, folderName, kwTitle, body, styleVal);
@@ -241,10 +241,10 @@ int main(int argc, const char *argv[]) {
             NSInteger styleVal = -1;
             if (opts[@"style"]) {
                 if (!isStrictInteger(opts[@"style"], &styleVal)) {
-                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
+                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 2=subheading, 3=body, 4=code-block, 100=bullet-list, 101=dash-list, 102=numbered-list, 103=checklist");
                 }
                 if (!isValidStyle(styleVal)) {
-                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
+                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 2=subheading, 3=body, 4=code-block, 100=bullet-list, 101=dash-list, 102=numbered-list, 103=checklist");
                 }
             }
             return cmdAppend(viewContext, noteID, kwText, styleVal);
@@ -257,10 +257,10 @@ int main(int argc, const char *argv[]) {
             NSInteger styleVal = -1;
             if (opts[@"style"]) {
                 if (!isStrictInteger(opts[@"style"], &styleVal)) {
-                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
+                    errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 2=subheading, 3=body, 4=code-block, 100=bullet-list, 101=dash-list, 102=numbered-list, 103=checklist");
                 }
                 if (!isValidStyle(styleVal)) {
-                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
+                    errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 2=subheading, 3=body, 4=code-block, 100=bullet-list, 101=dash-list, 102=numbered-list, 103=checklist");
                 }
             }
             return cmdInsert(viewContext, noteID, kwText, [opts[@"position"] integerValue],

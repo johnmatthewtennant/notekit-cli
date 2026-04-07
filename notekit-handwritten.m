@@ -696,6 +696,9 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
             case 1: // Heading
                 line = [NSString stringWithFormat:@"## %@", formattedText];
                 break;
+            case 2: // Subheading
+                line = [NSString stringWithFormat:@"### %@", formattedText];
+                break;
             case 100: // Dash list
                 line = [NSString stringWithFormat:@"%@- %@", indentStr, formattedText];
                 break;
@@ -740,7 +743,7 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
         if (i > 0) {
             [output appendString:@"\n"];
             // Add blank line before headings unless previous paragraph was already blank
-            if (style == 0 || style == 1) {
+            if (style == 0 || style == 1 || style == 2) {
                 NSDictionary *prev = paragraphs[i - 1];
                 NSInteger prevStyle = [prev[@"style"] integerValue];
                 NSString *prevText = prev[@"text"];
@@ -1163,6 +1166,11 @@ static NSArray *markdownToParaModel(NSString *markdown) {
         if ([line hasPrefix:@"# "]) {
             style = 0;
             textContent = [line substringFromIndex:2];
+        }
+        // Check for subheading: ### Text
+        else if ([line hasPrefix:@"### "]) {
+            style = 2;
+            textContent = [line substringFromIndex:4];
         }
         // Check for heading: ## Text
         else if ([line hasPrefix:@"## "]) {

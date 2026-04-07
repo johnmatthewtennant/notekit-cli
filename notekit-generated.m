@@ -137,7 +137,7 @@ static BOOL isStrictInteger(NSString *str, NSInteger *outValue) {
 }
 
 static BOOL isValidStyle(NSInteger style) {
-    return style == 0 || style == 1 || style == 3 || style == 4 || style == 100 || style == 102 || style == 103;
+    return style == 0 || style == 1 || style == 2 || style == 3 || style == 4 || style == 100 || style == 101 || style == 102 || style == 103;
 }
 
 static id makeParagraphStyle(NSInteger style) {
@@ -716,10 +716,10 @@ static int cmdSetAttr(id viewContext, NSString *identifier,
     if (attrOpts[@"style"]) {
         NSInteger styleVal;
         if (!isStrictInteger(attrOpts[@"style"], &styleVal)) {
-            errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
+            errorExit(@"--style must be a number. Valid styles: 0=title, 1=heading, 2=subheading, 3=body, 4=code-block, 100=bullet-list, 101=dash-list, 102=numbered-list, 103=checklist");
         }
         if (!isValidStyle(styleVal)) {
-            errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 3=body, 4=code-block, 100=dash-list, 102=numbered-list, 103=checklist");
+            errorExit(@"Invalid --style value. Valid styles: 0=title, 1=heading, 2=subheading, 3=body, 4=code-block, 100=bullet-list, 101=dash-list, 102=numbered-list, 103=checklist");
         }
     }
 

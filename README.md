@@ -52,6 +52,20 @@ Convenience (composed from primitives):
   notekit --help                               # full usage
 ```
 
+## Note-to-note links
+
+`read-markdown` outputs note-to-note links as standard markdown links with `applenotes://` URLs:
+
+```
+[Display Text](applenotes://showNote?identifier=NOTE_ID)
+```
+
+`write-markdown` recognizes this syntax and converts them back to native Apple Notes inline link attachments. To get a note's ID for linking:
+
+```bash
+notekit get --title "Target Note" | jq -r .id
+```
+
 ## Private API Notice
 
 Uses Apple's private `NotesShared.framework`. Not endorsed by Apple. May break with macOS updates.

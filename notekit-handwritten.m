@@ -2097,6 +2097,11 @@ static void usage(void) {
     fprintf(stderr, "code, lists, checklists, and note-to-note links. Primitives exist for edge\n");
     fprintf(stderr, "cases not covered by markdown syntax.\n");
     fprintf(stderr, "\n");
+    fprintf(stderr, "Note-to-note links:\n");
+    fprintf(stderr, "  read-markdown outputs note links as:  [Display Text](applenotes://showNote?identifier=NOTE_ID)\n");
+    fprintf(stderr, "  write-markdown accepts the same syntax and converts them back to native note links.\n");
+    fprintf(stderr, "  To get a note's ID for linking, use:  notekit get --title \"Target Note\" | jq -r .id\n");
+    fprintf(stderr, "\n");
     fprintf(stderr, "Reading and writing notes (recommended):\n");
     fprintf(stderr, "  notekit read-markdown (--title <title> | --id <id>) [--folder <name>]\n");
     fprintf(stderr, "  notekit write-markdown --id <id> [--dry-run] [--backup] [--diff]    Read markdown from stdin, replace note content\n");

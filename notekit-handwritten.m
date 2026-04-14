@@ -2059,12 +2059,17 @@ static int cmdInstallSkill(BOOL installClaude, BOOL installAgents, BOOL force) {
     int failures = 0;
     for (NSString *dir in targetDirs) {
         NSString *path = [dir stringByAppendingPathComponent:@"SKILL.md"];
-        if ([fm fileExistsAtPath:path]) {
-            if (!force) {
-                fprintf(stderr, "Error: %s already exists (use --force to overwrite)\n", [path UTF8String]);
-                failures++;
-                continue;
+        // Use attributesOfItemAtPath (not fileExistsAtPath) to detect broken symlinks
+        NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+        if (attrs) {
+            if (!force && [attrs[NSFileType] isEqualToString:NSFileTypeSymbolicLink]) {
+                NSString *dest = [fm destinationOfSymbolicLinkAtPath:path error:nil];
+                if ([dest isEqualToString:sourcePath]) {
+                    printf("Skill already installed: %s -> %s\n", [path UTF8String], [sourcePath UTF8String]);
+                    continue;
+                }
             }
+            printf("Replacing existing %s\n", [path UTF8String]);
             [fm removeItemAtPath:path error:nil];
         }
         if (![fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&error]) {

@@ -2059,9 +2059,9 @@ static int cmdInstallSkill(BOOL installClaude, BOOL installAgents, BOOL force) {
     int failures = 0;
     for (NSString *dir in targetDirs) {
         NSString *path = [dir stringByAppendingPathComponent:@"SKILL.md"];
-        if ([fm fileExistsAtPath:path]) {
-            // Check if it's already a symlink pointing to the same source
-            NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+        // Use attributesOfItemAtPath (not fileExistsAtPath) to detect broken symlinks
+        NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+        if (attrs) {
             if (!force && [attrs[NSFileType] isEqualToString:NSFileTypeSymbolicLink]) {
                 NSString *dest = [fm destinationOfSymbolicLinkAtPath:path error:nil];
                 if ([dest isEqualToString:sourcePath]) {
@@ -2069,6 +2069,7 @@ static int cmdInstallSkill(BOOL installClaude, BOOL installAgents, BOOL force) {
                     continue;
                 }
             }
+            printf("Replacing existing %s\n", [path UTF8String]);
             [fm removeItemAtPath:path error:nil];
         }
         if (![fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&error]) {

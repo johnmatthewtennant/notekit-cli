@@ -2780,6 +2780,249 @@ static int cmdTest(id viewContext) {
         [viewContext save:nil];
     }
 
+    // Test: CRDT note round-trip stability via write-markdown (full replace)
+    // After the fix, a fragmented CRDT note's markdown should round-trip
+    // cleanly: read1 -> write -> read2 yields read1 == read2. The first
+    // write canonicalizes the underlying TTStyle structure (one TTStyle per
+    // paragraph instead of many fragments), but the markdown text is stable.
+    fprintf(stderr, "Test: CRDT round-trip stability (full replace)...\n");
+    {
+        NSString *fragTitle = @"__crdt_rt_full_test__";
+        NSArray *p1Frags = @[@"Hello", @" ", @"World"];
+        NSArray *p2Frags = @[@"Foo", @" ", @"Bar"];
+        NSString *fragContent = [NSString stringWithFormat:@"%@\n%@\n%@",
+            fragTitle,
+            [p1Frags componentsJoinedByString:@""],
+            [p2Frags componentsJoinedByString:@""]];
+
+        id rtNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id rtDoc = ((id (*)(id, SEL))objc_msgSend)(rtNote, sel_registerName("document"));
+        id rtMs = ((id (*)(id, SEL))objc_msgSend)(rtDoc, sel_registerName("mergeableString"));
+        ((void (*)(id, SEL))objc_msgSend)(rtNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(rtMs, sel_registerName("insertString:atIndex:"), fragContent, 0);
+
+        id rtTitleStyle = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(rtTitleStyle, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(rtMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": rtTitleStyle}, NSMakeRange(0, fragTitle.length + 1));
+
+        NSUInteger rtOff = fragTitle.length + 1;
+        for (NSString *frag in p1Frags) {
+            id s = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s, sel_registerName("setStyle:"), 3);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(rtMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": s}, NSMakeRange(rtOff, frag.length));
+            rtOff += frag.length;
+        }
+        {
+            id sNL = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(sNL, sel_registerName("setStyle:"), 3);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(rtMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": sNL}, NSMakeRange(rtOff, 1));
+            rtOff += 1;
+        }
+        for (NSString *frag in p2Frags) {
+            id s = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s, sel_registerName("setStyle:"), 3);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(rtMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": s}, NSMakeRange(rtOff, frag.length));
+            rtOff += frag.length;
+        }
+
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            rtNote, sel_registerName("edited:range:changeInLength:"), 1,
+            NSMakeRange(0, fragContent.length), fragContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(rtNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(rtNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        // Round-trip: read1 -> write -> read2, assert read1 == read2.
+        NSString *md1 = noteToMarkdownString(rtNote);
+        // Suppress write-markdown's stdout JSON during the test
+        int devnullFd = open("/dev/null", O_WRONLY);
+        int savedStdout = dup(STDOUT_FILENO);
+        dup2(devnullFd, STDOUT_FILENO);
+        cmdWriteMarkdownWithString(rtNote, viewContext, md1, NO, NO, NO);
+        fflush(stdout);
+        dup2(savedStdout, STDOUT_FILENO);
+        close(savedStdout);
+        close(devnullFd);
+        [viewContext save:nil];
+        NSString *md2 = noteToMarkdownString(rtNote);
+
+        BOOL rtOk = [md1 isEqualToString:md2];
+        if (rtOk) { fprintf(stderr, "  PASS\n"); passed++; }
+        else {
+            fprintf(stderr, "  FAIL: round-trip not stable\n");
+            fprintf(stderr, "    md1: '%s'\n", [md1 UTF8String]);
+            fprintf(stderr, "    md2: '%s'\n", [md2 UTF8String]);
+            failed++;
+        }
+
+        deleteNote(rtNote, viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: CRDT note round-trip stability via write-markdown --diff
+    // The diff path uses LCS-based paragraph matching (paraSignature). After
+    // the fix, signatures are computed from properly-coalesced paragraphs,
+    // so a fragmented note round-trips cleanly through diff mode too.
+    fprintf(stderr, "Test: CRDT round-trip stability (diff mode)...\n");
+    {
+        NSString *fragTitle = @"__crdt_rt_diff_test__";
+        NSArray *p1Frags = @[@"Once", @" ", @"upon", @" ", @"a", @" ", @"time"];
+        NSArray *p2Frags = @[@"there", @" ", @"was", @" ", @"a", @" ", @"note"];
+        NSString *fragContent = [NSString stringWithFormat:@"%@\n%@\n%@",
+            fragTitle,
+            [p1Frags componentsJoinedByString:@""],
+            [p2Frags componentsJoinedByString:@""]];
+
+        id rtNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id rtDoc = ((id (*)(id, SEL))objc_msgSend)(rtNote, sel_registerName("document"));
+        id rtMs = ((id (*)(id, SEL))objc_msgSend)(rtDoc, sel_registerName("mergeableString"));
+        ((void (*)(id, SEL))objc_msgSend)(rtNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(rtMs, sel_registerName("insertString:atIndex:"), fragContent, 0);
+
+        id rtTitleStyle = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(rtTitleStyle, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(rtMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": rtTitleStyle}, NSMakeRange(0, fragTitle.length + 1));
+
+        NSUInteger rtOff = fragTitle.length + 1;
+        for (NSString *frag in p1Frags) {
+            id s = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s, sel_registerName("setStyle:"), 3);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(rtMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": s}, NSMakeRange(rtOff, frag.length));
+            rtOff += frag.length;
+        }
+        {
+            id sNL = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(sNL, sel_registerName("setStyle:"), 3);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(rtMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": sNL}, NSMakeRange(rtOff, 1));
+            rtOff += 1;
+        }
+        for (NSString *frag in p2Frags) {
+            id s = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s, sel_registerName("setStyle:"), 3);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(rtMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": s}, NSMakeRange(rtOff, frag.length));
+            rtOff += frag.length;
+        }
+
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            rtNote, sel_registerName("edited:range:changeInLength:"), 1,
+            NSMakeRange(0, fragContent.length), fragContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(rtNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(rtNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSString *md1 = noteToMarkdownString(rtNote);
+        int devnullFd = open("/dev/null", O_WRONLY);
+        int savedStdout = dup(STDOUT_FILENO);
+        dup2(devnullFd, STDOUT_FILENO);
+        // Last arg = YES means diff mode
+        cmdWriteMarkdownWithString(rtNote, viewContext, md1, NO, NO, YES);
+        fflush(stdout);
+        dup2(savedStdout, STDOUT_FILENO);
+        close(savedStdout);
+        close(devnullFd);
+        [viewContext save:nil];
+        NSString *md2 = noteToMarkdownString(rtNote);
+
+        BOOL rtOk = [md1 isEqualToString:md2];
+        if (rtOk) { fprintf(stderr, "  PASS\n"); passed++; }
+        else {
+            fprintf(stderr, "  FAIL: diff round-trip not stable\n");
+            fprintf(stderr, "    md1: '%s'\n", [md1 UTF8String]);
+            fprintf(stderr, "    md2: '%s'\n", [md2 UTF8String]);
+            failed++;
+        }
+
+        deleteNote(rtNote, viewContext);
+        [viewContext save:nil];
+    }
+
+    // Test: canonical multi-paragraph single-UUID layout
+    // Real Apple Notes notes often have one TTStyle UUID covering an entire
+    // body region of multiple paragraphs separated by literal \n characters
+    // (a single CoreData fragment, not CRDT).  Before the fix, the UUID-
+    // boundary detection treated this as one logical paragraph and converted
+    // internal \n into U+2028 soft line breaks.  After the fix, each \n is a
+    // real paragraph break.  This test guards the second-order behavior
+    // change so it doesn't silently regress.
+    fprintf(stderr, "Test: canonical multi-paragraph single-UUID...\n");
+    {
+        NSString *cTitle = @"__canonical_multi_para_test__";
+        NSString *cContent = [NSString stringWithFormat:@"%@\nFirst\nSecond\nThird", cTitle];
+
+        id cNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id cDoc = ((id (*)(id, SEL))objc_msgSend)(cNote, sel_registerName("document"));
+        id cMs = ((id (*)(id, SEL))objc_msgSend)(cDoc, sel_registerName("mergeableString"));
+        ((void (*)(id, SEL))objc_msgSend)(cNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(cMs, sel_registerName("insertString:atIndex:"), cContent, 0);
+
+        id cTitleStyle = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(cTitleStyle, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(cMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": cTitleStyle}, NSMakeRange(0, cTitle.length + 1));
+
+        // ONE body style for the whole multi-paragraph body region
+        id cBodyStyle = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(cBodyStyle, sel_registerName("setStyle:"), 3);
+        NSUInteger bodyStart = cTitle.length + 1;
+        NSUInteger bodyLen = cContent.length - bodyStart;
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(cMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": cBodyStyle}, NSMakeRange(bodyStart, bodyLen));
+
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            cNote, sel_registerName("edited:range:changeInLength:"), 1,
+            NSMakeRange(0, cContent.length), cContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(cNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(cNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSArray *cModel = noteToParaModel(cNote);
+        NSMutableArray *cFiltered = [NSMutableArray array];
+        BOOL cFc = NO;
+        for (NSDictionary *p in cModel) {
+            if (!cFc && [p[@"text"] length] == 0) continue;
+            cFc = YES;
+            [cFiltered addObject:p];
+        }
+
+        BOOL cOk = YES;
+        if (cFiltered.count != 4) {
+            cOk = NO;
+            fprintf(stderr, "  FAIL: expected 4 paragraphs (title + 3 body), got %lu\n",
+                (unsigned long)cFiltered.count);
+            for (NSUInteger pi = 0; pi < cFiltered.count; pi++) {
+                fprintf(stderr, "    [%lu] style=%ld text='%s'\n",
+                    (unsigned long)pi,
+                    (long)[cFiltered[pi][@"style"] integerValue],
+                    [cFiltered[pi][@"text"] UTF8String]);
+            }
+        } else {
+            NSArray *expectedTexts = @[cTitle, @"First", @"Second", @"Third"];
+            for (NSUInteger pi = 0; pi < expectedTexts.count; pi++) {
+                if (![cFiltered[pi][@"text"] isEqualToString:expectedTexts[pi]]) {
+                    cOk = NO;
+                    fprintf(stderr, "  FAIL: para %lu text: '%s' (expected '%s')\n",
+                        (unsigned long)pi,
+                        [cFiltered[pi][@"text"] UTF8String],
+                        [expectedTexts[pi] UTF8String]);
+                }
+            }
+        }
+
+        if (cOk) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { failed++; }
+
+        deleteNote(cNote, viewContext);
+        [viewContext save:nil];
+    }
+
     // Test: markdown code block round-trip
     fprintf(stderr, "Test: markdown code block round-trip...\n");
     {

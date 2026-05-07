@@ -40,7 +40,8 @@ int main(int argc, const char *argv[]) {
                     [flag isEqualToString:@"body-offset"] ||
                     [flag isEqualToString:@"dry-run"] ||
                     [flag isEqualToString:@"backup"] ||
-                    [flag isEqualToString:@"case-insensitive"]) {
+                    [flag isEqualToString:@"case-insensitive"] ||
+                    [flag isEqualToString:@"preserve-round-trip"]) {
                     opts[flag] = @"true";
                 } else if (i + 1 < argc) {
                     opts[flag] = [NSString stringWithUTF8String:argv[++i]];
@@ -60,7 +61,8 @@ int main(int argc, const char *argv[]) {
             @"pin", @"unpin", @"duplicate", @"create-folder", @"delete-folder",
             @"create-empty", @"create", @"delete", @"append", @"insert",
             @"delete-range", @"search-offset", @"replace", @"delete-line",
-            @"get-link", @"add-link", @"add-note-link", @"install-skill", @"test", nil];
+            @"get-link", @"add-link", @"add-note-link",
+            @"export", @"install-skill", @"test", nil];
         if (![knownCommands containsObject:command]) {
             fprintf(stderr, "Unknown command: %s\n", [command UTF8String]);
             usage();
@@ -307,6 +309,12 @@ int main(int argc, const char *argv[]) {
             if (!opts[@"target"]) errorExit(@"add-note-link requires --target");
             NSInteger position = opts[@"position"] ? [opts[@"position"] integerValue] : -1;
             return cmdAddNoteLink(viewContext, opts[@"id"], opts[@"target"], position);
+
+        } else if ([command isEqualToString:@"export"]) {
+            NSString *outputPath = opts[@"output"];
+            if (!outputPath || outputPath.length == 0) { fprintf(stderr, "Error: --output required\n"); usage(); return 1; }
+            BOOL preserveRoundTrip = [opts[@"preserve-round-trip"] isEqualToString:@"true"];
+            return cmdExport(viewContext, outputPath, folderName, opts[@"format"], preserveRoundTrip);
 
         } else if ([command isEqualToString:@"test"]) {
             return cmdTest(viewContext);

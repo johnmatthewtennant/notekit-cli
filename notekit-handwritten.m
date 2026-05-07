@@ -447,14 +447,22 @@ static NSArray *noteToParaModel(id note) {
         }
     }
 
+    // Paragraph boundaries are newline characters (U+000A) in the text — not
+    // TTStyle UUID changes. Canonical notes often have one TTStyle UUID
+    // covering many paragraphs separated by \n; shared/CRDT notes can have
+    // many distinct UUIDs within a single paragraph. Splitting on UUID
+    // therefore over-fragments shared notes (issue #48) and previously
+    // collapsed real paragraph breaks in canonical notes into soft line
+    // breaks. Splitting on \n is the semantic truth in either case.
     NSMutableArray *paragraphs = [NSMutableArray array];
     NSMutableString *currentText = [NSMutableString string];
     NSMutableArray *currentRuns = [NSMutableArray array];
     NSString *currentUUID = nil;
-    NSInteger currentStyle = -1;
+    NSInteger currentStyle = 3;
     BOOL currentTodoDone = NO;
     NSUInteger currentIndent = 0;
     NSUInteger runOffsetInPara = 0;
+    BOOL paragraphAttrsCaptured = NO;
     NSUInteger idx = 0;
     NSRange effectiveRange;
 
@@ -469,81 +477,76 @@ static NSArray *noteToParaModel(id note) {
         NSUInteger indent = style ? ((NSUInteger (*)(id, SEL))objc_msgSend)(style, sel_registerName("indent")) : 0;
         NSString *chunk = [fullText substringWithRange:effectiveRange];
 
-        if (currentUUID && [uuid isEqualToString:currentUUID]) {
-            // Same paragraph, accumulate text and runs
-            NSMutableDictionary *run = [NSMutableDictionary dictionary];
-            run[@"start"] = @(runOffsetInPara);
-            run[@"length"] = @(chunk.length);
-            id nsLink = attrs[@"NSLink"];
-            if (nsLink) run[@"link"] = [nsLink description];
-            // Check for note-to-note link attachment (￼ chars with NSAttachment)
-            id nsAttachment = attrs[@"NSAttachment"];
-            if (nsAttachment && !nsLink && [chunk isEqualToString:@"\uFFFC"]) {
-                NSDictionary *noteLink = noteLinksByOffset[@(effectiveRange.location)];
-                if (noteLink) {
-                    run[@"link"] = noteLink[@"url"];
-                    run[@"noteLinkDisplayText"] = noteLink[@"displayText"];
-                }
-            }
-            id strikethrough = attrs[@"TTStrikethrough"];
-            if (strikethrough) run[@"strikethrough"] = @YES;
-            id ttHints1 = attrs[@"TTHints"];
-            if (ttHints1) {
-                NSUInteger hints1 = [ttHints1 unsignedIntegerValue];
-                if (hints1 & 1) run[@"bold"] = @YES;
-                if (hints1 & 2) run[@"italic"] = @YES;
-            }
-            id ttUnderline1 = attrs[@"TTUnderline"];
-            if (ttUnderline1) run[@"underline"] = @YES;
-            [currentRuns addObject:run];
-            [currentText appendString:chunk];
-            runOffsetInPara += chunk.length;
-        } else {
-            // New paragraph - emit previous
-            if (currentText.length > 0) {
-                emitParagraph(paragraphs, currentText, currentRuns,
-                    currentStyle, currentIndent, currentTodoDone, currentUUID);
-            }
-            currentText = [NSMutableString stringWithString:chunk];
-            currentRuns = [NSMutableArray array];
-            currentUUID = uuid;
-            currentStyle = styleNum;
-            currentTodoDone = done;
-            currentIndent = indent;
-            runOffsetInPara = 0;
+        // Walk chunk segment-by-segment: each segment is text bounded by \n
+        // (or chunk start/end). Segments continue the current paragraph;
+        // each \n terminates it.
+        NSUInteger chunkPos = 0;
+        while (chunkPos < chunk.length) {
+            NSRange searchRange = NSMakeRange(chunkPos, chunk.length - chunkPos);
+            NSRange newlineRange = [chunk rangeOfString:@"\n" options:0 range:searchRange];
+            NSUInteger sliceEnd = (newlineRange.location != NSNotFound) ? newlineRange.location : chunk.length;
+            NSUInteger sliceLen = sliceEnd - chunkPos;
 
-            NSMutableDictionary *run = [NSMutableDictionary dictionary];
-            run[@"start"] = @(0);
-            run[@"length"] = @(chunk.length);
-            id nsLink = attrs[@"NSLink"];
-            if (nsLink) run[@"link"] = [nsLink description];
-            // Check for note-to-note link attachment (￼ chars with NSAttachment)
-            id nsAttachment = attrs[@"NSAttachment"];
-            if (nsAttachment && !nsLink && [chunk isEqualToString:@"\uFFFC"]) {
-                NSDictionary *noteLink = noteLinksByOffset[@(effectiveRange.location)];
-                if (noteLink) {
-                    run[@"link"] = noteLink[@"url"];
-                    run[@"noteLinkDisplayText"] = noteLink[@"displayText"];
+            // Capture paragraph-level attrs from the first chunk that
+            // contributes to this paragraph. Subsequent chunks (which may
+            // have different UUIDs in CRDT notes) keep the same paragraph
+            // and only add inline attribute info via per-run entries.
+            if (!paragraphAttrsCaptured) {
+                currentStyle = styleNum;
+                currentTodoDone = done;
+                currentIndent = indent;
+                currentUUID = uuid;
+                paragraphAttrsCaptured = YES;
+            }
+
+            if (sliceLen > 0) {
+                NSString *sliceText = [chunk substringWithRange:NSMakeRange(chunkPos, sliceLen)];
+                NSUInteger sliceGlobalOffset = effectiveRange.location + chunkPos;
+
+                NSMutableDictionary *run = [NSMutableDictionary dictionary];
+                run[@"start"] = @(runOffsetInPara);
+                run[@"length"] = @(sliceLen);
+                id nsLink = attrs[@"NSLink"];
+                if (nsLink) run[@"link"] = [nsLink description];
+                id nsAttachment = attrs[@"NSAttachment"];
+                if (nsAttachment && !nsLink && [sliceText isEqualToString:@"￼"]) {
+                    NSDictionary *noteLink = noteLinksByOffset[@(sliceGlobalOffset)];
+                    if (noteLink) {
+                        run[@"link"] = noteLink[@"url"];
+                        run[@"noteLinkDisplayText"] = noteLink[@"displayText"];
+                    }
                 }
+                id strikethrough = attrs[@"TTStrikethrough"];
+                if (strikethrough) run[@"strikethrough"] = @YES;
+                id ttHints = attrs[@"TTHints"];
+                if (ttHints) {
+                    NSUInteger hints = [ttHints unsignedIntegerValue];
+                    if (hints & 1) run[@"bold"] = @YES;
+                    if (hints & 2) run[@"italic"] = @YES;
+                }
+                id ttUnderline = attrs[@"TTUnderline"];
+                if (ttUnderline) run[@"underline"] = @YES;
+                [currentRuns addObject:run];
+                [currentText appendString:sliceText];
+                runOffsetInPara += sliceLen;
             }
-            id strikethrough = attrs[@"TTStrikethrough"];
-            if (strikethrough) run[@"strikethrough"] = @YES;
-            id ttHints2 = attrs[@"TTHints"];
-            if (ttHints2) {
-                NSUInteger hints2 = [ttHints2 unsignedIntegerValue];
-                if (hints2 & 1) run[@"bold"] = @YES;
-                if (hints2 & 2) run[@"italic"] = @YES;
-            }
-            id ttUnderline2 = attrs[@"TTUnderline"];
-            if (ttUnderline2) run[@"underline"] = @YES;
-            [currentRuns addObject:run];
-            runOffsetInPara = chunk.length;
+
+            if (newlineRange.location == NSNotFound) break;
+
+            // Hit a paragraph boundary: emit current paragraph and reset.
+            emitParagraph(paragraphs, currentText, currentRuns,
+                currentStyle, currentIndent, currentTodoDone, currentUUID);
+            currentText = [NSMutableString string];
+            currentRuns = [NSMutableArray array];
+            runOffsetInPara = 0;
+            paragraphAttrsCaptured = NO;
+            chunkPos = newlineRange.location + 1;
         }
 
         idx = effectiveRange.location + effectiveRange.length;
     }
-    // Emit last paragraph
-    if (currentText.length > 0) {
+    // Emit final paragraph if anything was captured.
+    if (paragraphAttrsCaptured) {
         emitParagraph(paragraphs, currentText, currentRuns,
             currentStyle, currentIndent, currentTodoDone, currentUUID);
     }
@@ -2234,11 +2237,28 @@ static int cmdExport(id viewContext, NSString *outputPath, NSString *folderFilte
             NSString *body = noteToMarkdownString(note);
             if (body) {
                 if (!preserveRoundTrip) {
+                    // Double single \n paragraph separators into blank lines
+                    // so paragraphs render correctly in any markdown viewer
+                    // (the model emits paragraphs joined by single \n; that
+                    // works in Obsidian's non-strict mode but not CommonMark/
+                    // GitHub).  Skip \n's that are already part of a blank-
+                    // line sequence so we don't multiply them.
+                    NSMutableString *withBlanks = [NSMutableString stringWithCapacity:body.length];
+                    for (NSUInteger i = 0; i < body.length; i++) {
+                        unichar c = [body characterAtIndex:i];
+                        [withBlanks appendFormat:@"%C", c];
+                        if (c == '\n') {
+                            BOOL prevNL = (i > 0 && [body characterAtIndex:i - 1] == '\n');
+                            BOOL nextNL = (i + 1 < body.length && [body characterAtIndex:i + 1] == '\n');
+                            if (!prevNL && !nextNL) [withBlanks appendString:@"\n"];
+                        }
+                    }
+                    body = withBlanks;
                     // Soft line breaks (U+2028, emitted as <br>) become
-                    // markdown hard breaks. unescapeMarkdown removes the
-                    // defensive backslash-escaping that exists for write-
-                    // markdown round-trip. Output is no longer round-trippable
-                    // but reads cleanly as plain text.
+                    // markdown hard breaks.  unescapeMarkdown removes the
+                    // defensive backslash escaping that exists for write-
+                    // markdown round-trip.  Output is no longer round-
+                    // trippable but reads cleanly as plain text.
                     body = [body stringByReplacingOccurrencesOfString:@"<br>" withString:@"  \n"];
                     body = unescapeMarkdown(body);
                 }

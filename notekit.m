@@ -314,7 +314,27 @@ int main(int argc, const char *argv[]) {
             NSString *outputPath = opts[@"output"];
             if (!outputPath || outputPath.length == 0) { fprintf(stderr, "Error: --output required\n"); usage(); return 1; }
             BOOL preserveRoundTrip = [opts[@"preserve-round-trip"] isEqualToString:@"true"];
-            return cmdExport(viewContext, outputPath, folderName, opts[@"format"], preserveRoundTrip);
+            NSSet *metadataFields = nil;
+            NSString *metadataArg = opts[@"metadata"];
+            if (metadataArg && metadataArg.length > 0) {
+                NSSet *valid = [NSSet setWithArray:@[
+                    @"id", @"account", @"pinned", @"locked",
+                    @"hasChecklist", @"hasTags", @"attachmentCount",
+                    @"snippet", @"url"
+                ]];
+                NSMutableSet *requested = [NSMutableSet set];
+                for (NSString *part in [metadataArg componentsSeparatedByString:@","]) {
+                    NSString *trimmed = [part stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                    if (trimmed.length == 0) continue;
+                    if (![valid containsObject:trimmed]) {
+                        fprintf(stderr, "Error: unknown metadata field '%s'. Valid: id, account, pinned, locked, hasChecklist, hasTags, attachmentCount, snippet, url\n", [trimmed UTF8String]);
+                        return 1;
+                    }
+                    [requested addObject:trimmed];
+                }
+                metadataFields = requested;
+            }
+            return cmdExport(viewContext, outputPath, folderName, opts[@"format"], preserveRoundTrip, metadataFields);
 
         } else if ([command isEqualToString:@"test"]) {
             return cmdTest(viewContext);

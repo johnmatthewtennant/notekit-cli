@@ -2154,7 +2154,7 @@ static NSString *yamlScalar(NSString *s) {
 
 // Export every (non-locked) note as one file with YAML frontmatter.
 // Mirrors folder hierarchy under outputPath. Locked notes are skipped.
-static int cmdExport(id viewContext, NSString *outputPath, NSString *folderFilter, NSString *format, BOOL preserveRoundTrip) {
+static int cmdExport(id viewContext, NSString *outputPath, NSString *folderFilter, NSString *format, BOOL preserveRoundTrip, NSSet *metadataFields) {
     if (!outputPath || outputPath.length == 0) errorExit(@"--output required");
     if (!format) format = @"md";
     BOOL isMarkdown = NO;
@@ -2231,6 +2231,69 @@ static int cmdExport(id viewContext, NSString *outputPath, NSString *folderFilte
         }
         if (createdDate)  [content appendFormat:@"created: %@\n",  dateToISO(createdDate)];
         if (modifiedDate) [content appendFormat:@"modified: %@\n", dateToISO(modifiedDate)];
+
+        // Optional metadata fields (additive; controlled by --metadata flag).
+        if ([metadataFields containsObject:@"id"]) {
+            @try {
+                NSString *noteID = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("identifier"));
+                if (noteID && noteID.length > 0) [content appendFormat:@"id: %@\n", yamlScalar(noteID)];
+            } @catch (NSException *e) {}
+        }
+        if ([metadataFields containsObject:@"account"]) {
+            @try {
+                id folder = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("folder"));
+                id account = folder ? ((id (*)(id, SEL))objc_msgSend)(folder, sel_registerName("account")) : nil;
+                NSString *acctName = nil;
+                if (account) {
+                    @try { acctName = ((id (*)(id, SEL))objc_msgSend)(account, sel_registerName("name")); } @catch (NSException *e) {}
+                }
+                if (acctName && acctName.length > 0) [content appendFormat:@"account: %@\n", yamlScalar(acctName)];
+            } @catch (NSException *e) {}
+        }
+        if ([metadataFields containsObject:@"pinned"]) {
+            BOOL v = NO;
+            @try { v = ((BOOL (*)(id, SEL))objc_msgSend)(note, sel_registerName("isPinned")); } @catch (NSException *e) {}
+            [content appendFormat:@"pinned: %@\n", v ? @"true" : @"false"];
+        }
+        if ([metadataFields containsObject:@"locked"]) {
+            BOOL v = NO;
+            @try { v = ((BOOL (*)(id, SEL))objc_msgSend)(note, sel_registerName("isLocked")); } @catch (NSException *e) {}
+            [content appendFormat:@"locked: %@\n", v ? @"true" : @"false"];
+        }
+        if ([metadataFields containsObject:@"hasChecklist"]) {
+            BOOL v = NO;
+            @try { v = ((BOOL (*)(id, SEL))objc_msgSend)(note, sel_registerName("hasChecklist")); } @catch (NSException *e) {}
+            [content appendFormat:@"hasChecklist: %@\n", v ? @"true" : @"false"];
+        }
+        if ([metadataFields containsObject:@"hasTags"]) {
+            BOOL v = NO;
+            @try { v = ((BOOL (*)(id, SEL))objc_msgSend)(note, sel_registerName("hasTags")); } @catch (NSException *e) {}
+            [content appendFormat:@"hasTags: %@\n", v ? @"true" : @"false"];
+        }
+        if ([metadataFields containsObject:@"attachmentCount"]) {
+            @try {
+                id atts = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attachments"));
+                NSUInteger count = atts ? [atts count] : 0;
+                [content appendFormat:@"attachmentCount: %lu\n", (unsigned long)count];
+            } @catch (NSException *e) {}
+        }
+        if ([metadataFields containsObject:@"snippet"]) {
+            @try {
+                NSString *snippet = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("snippet"));
+                if (snippet && snippet.length > 0) [content appendFormat:@"snippet: %@\n", yamlScalar(snippet)];
+            } @catch (NSException *e) {}
+        }
+        if ([metadataFields containsObject:@"url"]) {
+            @try {
+                Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities");
+                if (ICAppURLUtilities) {
+                    NSURL *appURL = ((id (*)(id, SEL, id))objc_msgSend)(
+                        ICAppURLUtilities, sel_registerName("appURLForNote:"), note);
+                    if (appURL) [content appendFormat:@"url: %@\n", yamlScalar([appURL absoluteString])];
+                }
+            } @catch (NSException *e) {}
+        }
+
         [content appendString:@"---\n\n"];
 
         if (isMarkdown) {
@@ -2328,10 +2391,13 @@ static void usage(void) {
     fprintf(stderr, "\n");
     fprintf(stderr, "Bulk export:\n");
     fprintf(stderr, "  notekit export --output <dir> [--folder <name>] [--format md|txt]\n");
-    fprintf(stderr, "                 [--preserve-round-trip]\n");
+    fprintf(stderr, "                 [--metadata <fields>] [--preserve-round-trip]\n");
     fprintf(stderr, "      Writes one file per note with YAML frontmatter (title, folder, created,\n");
-    fprintf(stderr, "      modified). Mirrors folder hierarchy as subdirectories. Locked notes are\n");
-    fprintf(stderr, "      skipped with a warning. Default format is md.\n");
+    fprintf(stderr, "      modified always included). Mirrors folder hierarchy as subdirectories.\n");
+    fprintf(stderr, "      Locked notes are skipped with a warning. Default format is md.\n");
+    fprintf(stderr, "      --metadata adds optional frontmatter fields (comma-separated).\n");
+    fprintf(stderr, "        Available: id, account, pinned, locked, hasChecklist, hasTags,\n");
+    fprintf(stderr, "        attachmentCount, snippet, url.\n");
     fprintf(stderr, "      By default, soft line breaks become markdown hard breaks and defensive\n");
     fprintf(stderr,  "      backslash escaping is removed for clean human-readable output.\n");
     fprintf(stderr, "      Use --preserve-round-trip to keep <br> tags and char escapes so the\n");

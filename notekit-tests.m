@@ -2660,6 +2660,126 @@ static int cmdTest(id viewContext) {
         [viewContext save:nil];
     }
 
+    // Test: shared/CRDT note paragraph coalescing (issue #48)
+    // Shared notes back their attributed string with a CRDT (ICTTMergeableString)
+    // which produces many small TTStyle fragments — each with a distinct UUID —
+    // even within a single logical paragraph.  Before the fix, noteToParaModel
+    // used UUID change as the paragraph boundary, so a paragraph like
+    // "Hello World" split across three style fragments was emitted as three
+    // separate paragraphs ("Hello", " ", "World") and rendered as one
+    // character/token per line.  The fix splits paragraphs on the actual \n
+    // character, so multi-fragment paragraphs coalesce correctly.
+    fprintf(stderr, "Test: shared/CRDT paragraph coalescing (#48)...\n");
+    {
+        NSString *fragTitle = @"__crdt_frag_test__";
+        // Two body paragraphs, each split into multiple style-3 fragments
+        // (each fragment's TTStyle alloc'd separately so it gets its own UUID).
+        NSArray *p1Frags = @[@"Hello", @" ", @"World"];
+        NSArray *p2Frags = @[@"Foo", @" ", @"Bar"];
+        NSString *p1Joined = [p1Frags componentsJoinedByString:@""];
+        NSString *p2Joined = [p2Frags componentsJoinedByString:@""];
+        NSString *fragContent = [NSString stringWithFormat:@"%@\n%@\n%@", fragTitle, p1Joined, p2Joined];
+
+        id fragNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+        id fragDoc = ((id (*)(id, SEL))objc_msgSend)(fragNote, sel_registerName("document"));
+        id fragMs = ((id (*)(id, SEL))objc_msgSend)(fragDoc, sel_registerName("mergeableString"));
+        ((void (*)(id, SEL))objc_msgSend)(fragNote, sel_registerName("beginEditing"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(fragMs, sel_registerName("insertString:atIndex:"), fragContent, 0);
+
+        // Title style (covers title text + the trailing \n)
+        id sTitle = [[ICTTParagraphStyleClass alloc] init];
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(sTitle, sel_registerName("setStyle:"), 0);
+        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(fragMs, sel_registerName("setAttributes:range:"),
+            @{@"TTStyle": sTitle}, NSMakeRange(0, fragTitle.length + 1));
+
+        // Body para 1: each fragment gets its own ICTTParagraphStyle / UUID
+        NSUInteger fragOff = fragTitle.length + 1;
+        for (NSString *frag in p1Frags) {
+            id s = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s, sel_registerName("setStyle:"), 3);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(fragMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": s}, NSMakeRange(fragOff, frag.length));
+            fragOff += frag.length;
+        }
+        // Newline between paragraphs gets its own style (yet another UUID)
+        {
+            id sNL = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(sNL, sel_registerName("setStyle:"), 3);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(fragMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": sNL}, NSMakeRange(fragOff, 1));
+            fragOff += 1;
+        }
+        // Body para 2: same multi-fragment treatment
+        for (NSString *frag in p2Frags) {
+            id s = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(s, sel_registerName("setStyle:"), 3);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(fragMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": s}, NSMakeRange(fragOff, frag.length));
+            fragOff += frag.length;
+        }
+
+        ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+            fragNote, sel_registerName("edited:range:changeInLength:"), 1,
+            NSMakeRange(0, fragContent.length), fragContent.length);
+        ((void (*)(id, SEL))objc_msgSend)(fragNote, sel_registerName("endEditing"));
+        ((void (*)(id, SEL))objc_msgSend)(fragNote, sel_registerName("saveNoteData"));
+        [viewContext save:nil];
+
+        NSArray *fragModel = noteToParaModel(fragNote);
+        // Strip leading empty paragraphs (canonical leading \n) — same filter
+        // pattern used by noteToMarkdownString.
+        NSMutableArray *fragFiltered = [NSMutableArray array];
+        BOOL fragFc = NO;
+        for (NSDictionary *p in fragModel) {
+            if (!fragFc && [p[@"text"] length] == 0) continue;
+            fragFc = YES;
+            [fragFiltered addObject:p];
+        }
+
+        BOOL fragOk = YES;
+        if (fragFiltered.count != 3) {
+            fragOk = NO;
+            fprintf(stderr, "  FAIL: paragraph count: expected 3, got %lu\n",
+                (unsigned long)fragFiltered.count);
+            for (NSUInteger pi = 0; pi < fragFiltered.count; pi++) {
+                fprintf(stderr, "    [%lu] style=%ld text='%s'\n",
+                    (unsigned long)pi,
+                    (long)[fragFiltered[pi][@"style"] integerValue],
+                    [fragFiltered[pi][@"text"] UTF8String]);
+            }
+        } else {
+            if (![fragFiltered[0][@"text"] isEqualToString:fragTitle]) {
+                fragOk = NO;
+                fprintf(stderr, "  FAIL: title text: '%s' (expected '%s')\n",
+                    [fragFiltered[0][@"text"] UTF8String], [fragTitle UTF8String]);
+            }
+            if (![fragFiltered[1][@"text"] isEqualToString:p1Joined]) {
+                fragOk = NO;
+                fprintf(stderr, "  FAIL: body para 1: '%s' (expected '%s')\n",
+                    [fragFiltered[1][@"text"] UTF8String], [p1Joined UTF8String]);
+            }
+            if (![fragFiltered[2][@"text"] isEqualToString:p2Joined]) {
+                fragOk = NO;
+                fprintf(stderr, "  FAIL: body para 2: '%s' (expected '%s')\n",
+                    [fragFiltered[2][@"text"] UTF8String], [p2Joined UTF8String]);
+            }
+        }
+
+        // Also verify the markdown output isn't fragmented across many lines
+        NSString *fragMd = paraModelToMarkdown(fragFiltered);
+        if (![fragMd containsString:p1Joined]) {
+            fragOk = NO;
+            fprintf(stderr, "  FAIL: markdown missing '%s', got:\n%s\n",
+                [p1Joined UTF8String], [fragMd UTF8String]);
+        }
+
+        if (fragOk) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { failed++; }
+
+        deleteNote(fragNote, viewContext);
+        [viewContext save:nil];
+    }
+
     // Test: markdown code block round-trip
     fprintf(stderr, "Test: markdown code block round-trip...\n");
     {

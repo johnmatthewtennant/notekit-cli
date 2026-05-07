@@ -554,9 +554,29 @@ static NSArray *noteToParaModel(id note) {
     return paragraphs;
 }
 
-// Render paragraph model as markdown
-static NSString *paraModelToMarkdown(NSArray *paragraphs) {
+// Whether a paragraph style is a list type (dash/bullet, numbered, checklist).
+// Used by the blank-line emit mode to keep adjacent list items tight.
+static BOOL paraStyleIsList(NSInteger style) {
+    return style == 100 || style == 101 || style == 102 || style == 103;
+}
+
+// Render paragraph model as markdown.
+//
+// When blankLineSeparators is NO (the historical default used by
+// read-markdown / write-markdown round-trip), paragraphs are joined with a
+// single \n; an extra \n is added before headings unless the previous
+// paragraph was a blank body paragraph.  Empty body paragraphs emit their
+// own \n so the user-supplied blank-line structure is preserved.
+//
+// When blankLineSeparators is YES (used by the export pipeline), paragraphs
+// are joined with a blank line (\n\n) by default — except between two
+// adjacent list-style paragraphs, which stay tight (\n) so the result
+// renders as a compact list rather than a loose, paragraph-spaced one.
+// Empty body paragraphs are skipped because the blank line is already
+// implicit in the regular separator.
+static NSString *paraModelToMarkdownEx(NSArray *paragraphs, BOOL blankLineSeparators) {
     NSMutableString *output = [NSMutableString string];
+    NSDictionary *lastEmittedPara = nil;
 
     for (NSUInteger i = 0; i < paragraphs.count; i++) {
         NSDictionary *para = paragraphs[i];
@@ -566,13 +586,44 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
 
         if (rawText.length == 0 && style == 3) {
             // Empty body paragraph = blank line
-            if (i > 0) [output appendString:@"\n"];
+            if (!blankLineSeparators) {
+                if (i > 0) [output appendString:@"\n"];
+            }
+            // In blank-line mode, skip — the separator before the next
+            // non-empty paragraph already provides the blank line.
             continue;
+        }
+
+        // Decide and emit the separator before this paragraph.
+        if (blankLineSeparators) {
+            if (lastEmittedPara) {
+                NSInteger prevStyle = [lastEmittedPara[@"style"] integerValue];
+                if (paraStyleIsList(style) && paraStyleIsList(prevStyle)) {
+                    [output appendString:@"\n"];
+                } else {
+                    [output appendString:@"\n\n"];
+                }
+            }
+        } else {
+            // Tight mode: separator goes before code blocks too (the style==4
+            // branch below historically had its own "if (i > 0) \n" — that
+            // is now consolidated here).
+            if (i > 0) {
+                [output appendString:@"\n"];
+                if (style == 0 || style == 1 || style == 2) {
+                    NSDictionary *prev = paragraphs[i - 1];
+                    NSInteger prevStyle = [prev[@"style"] integerValue];
+                    NSString *prevText = prev[@"text"];
+                    BOOL prevWasBlank = (prevStyle == 3 && prevText.length == 0);
+                    if (!prevWasBlank) {
+                        [output appendString:@"\n"];
+                    }
+                }
+            }
         }
 
         // Handle code block paragraphs (style 4) — no markdown escaping
         if (style == 4) {
-            if (i > 0) [output appendString:@"\n"];
             // Replace U+2028 line separators back to newlines
             NSString *codeText = [rawText stringByReplacingOccurrencesOfString:@"\u2028" withString:@"\n"];
             // Choose fence that won't conflict with code content
@@ -598,6 +649,7 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
                 [output appendString:@"\n"];
             }
             [output appendString:fence];
+            lastEmittedPara = para;
             continue;
         }
 
@@ -743,23 +795,23 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs) {
             }
         }
 
-        if (i > 0) {
-            [output appendString:@"\n"];
-            // Add blank line before headings unless previous paragraph was already blank
-            if (style == 0 || style == 1 || style == 2) {
-                NSDictionary *prev = paragraphs[i - 1];
-                NSInteger prevStyle = [prev[@"style"] integerValue];
-                NSString *prevText = prev[@"text"];
-                BOOL prevWasBlank = (prevStyle == 3 && prevText.length == 0);
-                if (!prevWasBlank) {
-                    [output appendString:@"\n"];
-                }
-            }
-        }
         [output appendString:line];
+        lastEmittedPara = para;
     }
 
     return output;
+}
+
+// Tight separators (preserves write-markdown round-trip); used by
+// read-markdown and any in-process readback path.
+static NSString *paraModelToMarkdown(NSArray *paragraphs) {
+    return paraModelToMarkdownEx(paragraphs, NO);
+}
+
+// Blank-line separators with tight-list exception; used by export to produce
+// human-readable markdown that renders correctly in any markdown viewer.
+static NSString *paraModelToMarkdownLoose(NSArray *paragraphs) {
+    return paraModelToMarkdownEx(paragraphs, YES);
 }
 
 // Helper: get a note's content as a markdown string (for readback after writes)
@@ -2297,36 +2349,31 @@ static int cmdExport(id viewContext, NSString *outputPath, NSString *folderFilte
         [content appendString:@"---\n\n"];
 
         if (isMarkdown) {
-            NSString *body = noteToMarkdownString(note);
-            if (body) {
-                if (!preserveRoundTrip) {
-                    // Double single \n paragraph separators into blank lines
-                    // so paragraphs render correctly in any markdown viewer
-                    // (the model emits paragraphs joined by single \n; that
-                    // works in Obsidian's non-strict mode but not CommonMark/
-                    // GitHub).  Skip \n's that are already part of a blank-
-                    // line sequence so we don't multiply them.
-                    NSMutableString *withBlanks = [NSMutableString stringWithCapacity:body.length];
-                    for (NSUInteger i = 0; i < body.length; i++) {
-                        unichar c = [body characterAtIndex:i];
-                        [withBlanks appendFormat:@"%C", c];
-                        if (c == '\n') {
-                            BOOL prevNL = (i > 0 && [body characterAtIndex:i - 1] == '\n');
-                            BOOL nextNL = (i + 1 < body.length && [body characterAtIndex:i + 1] == '\n');
-                            if (!prevNL && !nextNL) [withBlanks appendString:@"\n"];
-                        }
-                    }
-                    body = withBlanks;
-                    // Soft line breaks (U+2028, emitted as <br>) become
-                    // markdown hard breaks.  unescapeMarkdown removes the
-                    // defensive backslash escaping that exists for write-
-                    // markdown round-trip.  Output is no longer round-
-                    // trippable but reads cleanly as plain text.
-                    body = [body stringByReplacingOccurrencesOfString:@"<br>" withString:@"  \n"];
-                    body = unescapeMarkdown(body);
+            NSString *body;
+            if (preserveRoundTrip) {
+                // Tight format identical to read-markdown so write-markdown
+                // can round-trip the export.
+                body = noteToMarkdownString(note);
+            } else {
+                // Loose format: blank-line separators between paragraphs
+                // (with adjacent list items kept tight) for clean rendering
+                // in any markdown viewer.  Soft line breaks (U+2028, emitted
+                // as <br>) become markdown hard breaks; defensive backslash
+                // escaping is removed for human readability.  Output is no
+                // longer round-trippable through write-markdown.
+                NSArray *model = noteToParaModel(note);
+                NSMutableArray *filtered = [NSMutableArray array];
+                BOOL fc = NO;
+                for (NSDictionary *p in model) {
+                    if (!fc && [p[@"text"] length] == 0) continue;
+                    fc = YES;
+                    [filtered addObject:p];
                 }
-                [content appendString:body];
+                body = paraModelToMarkdownLoose(filtered);
+                body = [body stringByReplacingOccurrencesOfString:@"<br>" withString:@"  \n"];
+                body = unescapeMarkdown(body);
             }
+            if (body) [content appendString:body];
         } else {
             [content appendFormat:@"%@\n\n", title];
             NSString *body = nil;

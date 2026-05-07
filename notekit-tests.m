@@ -3023,6 +3023,102 @@ static int cmdTest(id viewContext) {
         [viewContext save:nil];
     }
 
+    // Test: paraModelToMarkdownLoose — adjacent list items stay tight
+    // The export pipeline emits paragraphs separated by blank lines for
+    // CommonMark/GitHub rendering, except consecutive list items which
+    // must remain tight so they render as a compact list.
+    fprintf(stderr, "Test: paraModelToMarkdownLoose tight list...\n");
+    {
+        NSArray *model = @[
+            @{@"style": @103, @"indent": @0, @"text": @"Item 1", @"todoChecked": @NO},
+            @{@"style": @103, @"indent": @0, @"text": @"Item 2", @"todoChecked": @YES},
+            @{@"style": @103, @"indent": @0, @"text": @"Item 3", @"todoChecked": @NO},
+        ];
+        NSString *out = paraModelToMarkdownLoose(model);
+        NSString *expected = @"- [ ] Item 1\n- [x] Item 2\n- [ ] Item 3";
+        if ([out isEqualToString:expected]) { fprintf(stderr, "  PASS\n"); passed++; }
+        else {
+            fprintf(stderr, "  FAIL\n    got:  '%s'\n    want: '%s'\n",
+                [out UTF8String], [expected UTF8String]);
+            failed++;
+        }
+    }
+
+    // Test: paraModelToMarkdownLoose — body→list and list→body get blank lines
+    fprintf(stderr, "Test: paraModelToMarkdownLoose mixed transitions...\n");
+    {
+        NSArray *model = @[
+            @{@"style": @3, @"indent": @0, @"text": @"Intro paragraph"},
+            @{@"style": @103, @"indent": @0, @"text": @"List item A", @"todoChecked": @NO},
+            @{@"style": @103, @"indent": @0, @"text": @"List item B", @"todoChecked": @NO},
+            @{@"style": @3, @"indent": @0, @"text": @"Closing paragraph"},
+        ];
+        NSString *out = paraModelToMarkdownLoose(model);
+        NSString *expected = @"Intro paragraph\n\n- [ ] List item A\n- [ ] List item B\n\nClosing paragraph";
+        if ([out isEqualToString:expected]) { fprintf(stderr, "  PASS\n"); passed++; }
+        else {
+            fprintf(stderr, "  FAIL\n    got:  '%s'\n    want: '%s'\n",
+                [out UTF8String], [expected UTF8String]);
+            failed++;
+        }
+    }
+
+    // Test: paraModelToMarkdownLoose — body↔body uses blank lines
+    fprintf(stderr, "Test: paraModelToMarkdownLoose body separation...\n");
+    {
+        NSArray *model = @[
+            @{@"style": @3, @"indent": @0, @"text": @"First."},
+            @{@"style": @3, @"indent": @0, @"text": @"Second."},
+            @{@"style": @3, @"indent": @0, @"text": @"Third."},
+        ];
+        NSString *out = paraModelToMarkdownLoose(model);
+        NSString *expected = @"First.\n\nSecond.\n\nThird.";
+        if ([out isEqualToString:expected]) { fprintf(stderr, "  PASS\n"); passed++; }
+        else {
+            fprintf(stderr, "  FAIL\n    got:  '%s'\n    want: '%s'\n",
+                [out UTF8String], [expected UTF8String]);
+            failed++;
+        }
+    }
+
+    // Test: paraModelToMarkdownLoose — heading gets blank line, no double-blank
+    fprintf(stderr, "Test: paraModelToMarkdownLoose heading separation...\n");
+    {
+        NSArray *model = @[
+            @{@"style": @3, @"indent": @0, @"text": @"Body before."},
+            @{@"style": @1, @"indent": @0, @"text": @"My Heading"},
+            @{@"style": @3, @"indent": @0, @"text": @"Body after."},
+        ];
+        NSString *out = paraModelToMarkdownLoose(model);
+        NSString *expected = @"Body before.\n\n## My Heading\n\nBody after.";
+        if ([out isEqualToString:expected]) { fprintf(stderr, "  PASS\n"); passed++; }
+        else {
+            fprintf(stderr, "  FAIL\n    got:  '%s'\n    want: '%s'\n",
+                [out UTF8String], [expected UTF8String]);
+            failed++;
+        }
+    }
+
+    // Test: paraModelToMarkdownLoose — empty body paragraphs are skipped
+    // The blank line is provided by the regular separator; intentional empty
+    // paragraphs in the model don't produce extra newlines in loose mode.
+    fprintf(stderr, "Test: paraModelToMarkdownLoose skips empty paragraphs...\n");
+    {
+        NSArray *model = @[
+            @{@"style": @3, @"indent": @0, @"text": @"A"},
+            @{@"style": @3, @"indent": @0, @"text": @""},
+            @{@"style": @3, @"indent": @0, @"text": @"B"},
+        ];
+        NSString *out = paraModelToMarkdownLoose(model);
+        NSString *expected = @"A\n\nB";
+        if ([out isEqualToString:expected]) { fprintf(stderr, "  PASS\n"); passed++; }
+        else {
+            fprintf(stderr, "  FAIL\n    got:  '%s'\n    want: '%s'\n",
+                [out UTF8String], [expected UTF8String]);
+            failed++;
+        }
+    }
+
     // Test: markdown code block round-trip
     fprintf(stderr, "Test: markdown code block round-trip...\n");
     {

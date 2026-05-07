@@ -574,7 +574,7 @@ static BOOL paraStyleIsList(NSInteger style) {
 // renders as a compact list rather than a loose, paragraph-spaced one.
 // Empty body paragraphs are skipped because the blank line is already
 // implicit in the regular separator.
-static NSString *paraModelToMarkdownEx(NSArray *paragraphs, BOOL blankLineSeparators) {
+static NSString *paraModelToMarkdown(NSArray *paragraphs, BOOL blankLineSeparators) {
     NSMutableString *output = [NSMutableString string];
     NSDictionary *lastEmittedPara = nil;
 
@@ -802,18 +802,6 @@ static NSString *paraModelToMarkdownEx(NSArray *paragraphs, BOOL blankLineSepara
     return output;
 }
 
-// Tight separators (preserves write-markdown round-trip); used by
-// read-markdown and any in-process readback path.
-static NSString *paraModelToMarkdown(NSArray *paragraphs) {
-    return paraModelToMarkdownEx(paragraphs, NO);
-}
-
-// Blank-line separators with tight-list exception; used by export to produce
-// human-readable markdown that renders correctly in any markdown viewer.
-static NSString *paraModelToMarkdownLoose(NSArray *paragraphs) {
-    return paraModelToMarkdownEx(paragraphs, YES);
-}
-
 // Helper: get a note's content as a markdown string (for readback after writes)
 static NSString *noteToMarkdownString(id note) {
     NSArray *model = noteToParaModel(note);
@@ -828,7 +816,7 @@ static NSString *noteToMarkdownString(id note) {
         [filtered addObject:para];
     }
 
-    return paraModelToMarkdown(filtered);
+    return paraModelToMarkdown(filtered, NO);
 }
 
 static int cmdReadMarkdownNote(id note) {
@@ -2369,7 +2357,7 @@ static int cmdExport(id viewContext, NSString *outputPath, NSString *folderFilte
                     fc = YES;
                     [filtered addObject:p];
                 }
-                body = paraModelToMarkdownLoose(filtered);
+                body = paraModelToMarkdown(filtered, YES);
                 body = [body stringByReplacingOccurrencesOfString:@"<br>" withString:@"  \n"];
                 body = unescapeMarkdown(body);
             }

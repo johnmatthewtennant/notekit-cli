@@ -2091,6 +2091,186 @@ static int cmdInstallSkill(BOOL installClaude, BOOL installAgents, BOOL force) {
 }
 
 
+// --- Bulk export ---
+
+// Walk parent chain to build a folder path like "Personal/Moving".
+// Returns nil if the note has no folder or only an empty-named root.
+static NSString *folderPathForNote(id note) {
+    id folder = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("folder"));
+    if (!folder) return nil;
+    NSMutableArray *components = [NSMutableArray array];
+    while (folder) {
+        NSString *title = nil;
+        @try {
+            title = ((id (*)(id, SEL))objc_msgSend)(folder, sel_registerName("title"));
+        } @catch (NSException *e) {}
+        if (title && title.length > 0) [components insertObject:title atIndex:0];
+        @try {
+            folder = ((id (*)(id, SEL))objc_msgSend)(folder, sel_registerName("parentFolder"));
+        } @catch (NSException *e) { folder = nil; }
+    }
+    if (components.count == 0) return nil;
+    return [components componentsJoinedByString:@"/"];
+}
+
+// Sanitize a string for use as a single filename or directory component.
+// Replaces filesystem-hostile chars and trims; returns "Untitled" if empty.
+static NSString *sanitizeFilenameComponent(NSString *s) {
+    if (!s || s.length == 0) return @"Untitled";
+    NSMutableString *out = [NSMutableString stringWithCapacity:s.length];
+    for (NSUInteger i = 0; i < s.length; i++) {
+        unichar c = [s characterAtIndex:i];
+        if (c == '/' || c == ':' || c == '\\' || c == 0 || c < 0x20) {
+            [out appendString:@"-"];
+        } else {
+            [out appendFormat:@"%C", c];
+        }
+    }
+    NSString *trimmed = [out stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (trimmed.length == 0) return @"Untitled";
+    if (trimmed.length > 200) trimmed = [trimmed substringToIndex:200];
+    return trimmed;
+}
+
+// Format a string as a YAML double-quoted scalar with standard escapes.
+static NSString *yamlScalar(NSString *s) {
+    NSMutableString *escaped = [NSMutableString stringWithCapacity:s.length + 2];
+    [escaped appendString:@"\""];
+    for (NSUInteger i = 0; i < s.length; i++) {
+        unichar c = [s characterAtIndex:i];
+        if (c == '\\') [escaped appendString:@"\\\\"];
+        else if (c == '"') [escaped appendString:@"\\\""];
+        else if (c == '\n') [escaped appendString:@"\\n"];
+        else if (c == '\r') [escaped appendString:@"\\r"];
+        else if (c == '\t') [escaped appendString:@"\\t"];
+        else [escaped appendFormat:@"%C", c];
+    }
+    [escaped appendString:@"\""];
+    return escaped;
+}
+
+// Export every (non-locked) note as one file with YAML frontmatter.
+// Mirrors folder hierarchy under outputPath. Locked notes are skipped.
+static int cmdExport(id viewContext, NSString *outputPath, NSString *folderFilter, NSString *format, BOOL preserveRoundTrip) {
+    if (!outputPath || outputPath.length == 0) errorExit(@"--output required");
+    if (!format) format = @"md";
+    BOOL isMarkdown = NO;
+    if ([format isEqualToString:@"md"]) isMarkdown = YES;
+    else if ([format isEqualToString:@"txt"]) isMarkdown = NO;
+    else errorExit(@"--format must be 'md' or 'txt'");
+
+    NSString *expandedOut = [outputPath stringByExpandingTildeInPath];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSError *err = nil;
+    if (![fm createDirectoryAtPath:expandedOut withIntermediateDirectories:YES attributes:nil error:&err]) {
+        errorExit([NSString stringWithFormat:@"Cannot create output directory: %@", err]);
+    }
+
+    NSArray *notes = fetchNotes(viewContext, folderFilter, 0);
+    NSMutableSet *usedPaths = [NSMutableSet set];
+    NSUInteger written = 0, skippedLocked = 0;
+
+    for (id note in notes) {
+        BOOL locked = NO;
+        @try { locked = ((BOOL (*)(id, SEL))objc_msgSend)(note, sel_registerName("isLocked")); } @catch (NSException *e) {}
+
+        NSString *title = nil;
+        @try { title = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("title")); } @catch (NSException *e) {}
+        if (!title || title.length == 0) title = @"Untitled";
+
+        if (locked) {
+            fprintf(stderr, "Skipping locked note: %s\n", [title UTF8String]);
+            skippedLocked++;
+            continue;
+        }
+
+        NSString *folderPath = folderPathForNote(note);
+        NSDate *createdDate = nil, *modifiedDate = nil;
+        @try { createdDate = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("creationDate")); } @catch (NSException *e) {}
+        @try { modifiedDate = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("modificationDate")); } @catch (NSException *e) {}
+
+        NSString *destDir = expandedOut;
+        if (folderPath && folderPath.length > 0) {
+            for (NSString *p in [folderPath componentsSeparatedByString:@"/"]) {
+                destDir = [destDir stringByAppendingPathComponent:sanitizeFilenameComponent(p)];
+            }
+            if (![fm createDirectoryAtPath:destDir withIntermediateDirectories:YES attributes:nil error:&err]) {
+                fprintf(stderr, "Failed to create folder %s: %s\n",
+                        [destDir UTF8String], [[err localizedDescription] UTF8String]);
+                continue;
+            }
+        }
+
+        NSString *titlePart = sanitizeFilenameComponent(title);
+        NSString *baseName = titlePart;
+        if (createdDate) {
+            NSString *iso = dateToISO(createdDate);
+            if (iso && iso.length >= 10) {
+                baseName = [NSString stringWithFormat:@"%@ %@", [iso substringToIndex:10], titlePart];
+            }
+        }
+        NSString *ext = isMarkdown ? @"md" : @"txt";
+        NSString *candidate = [destDir stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"%@.%@", baseName, ext]];
+        NSUInteger n = 2;
+        while ([usedPaths containsObject:candidate] || [fm fileExistsAtPath:candidate]) {
+            candidate = [destDir stringByAppendingPathComponent:
+                [NSString stringWithFormat:@"%@-%lu.%@", baseName, (unsigned long)n, ext]];
+            n++;
+        }
+        [usedPaths addObject:candidate];
+
+        NSMutableString *content = [NSMutableString string];
+        [content appendString:@"---\n"];
+        [content appendFormat:@"title: %@\n", yamlScalar(title)];
+        if (folderPath && folderPath.length > 0) {
+            [content appendFormat:@"folder: %@\n", yamlScalar(folderPath)];
+        }
+        if (createdDate)  [content appendFormat:@"created: %@\n",  dateToISO(createdDate)];
+        if (modifiedDate) [content appendFormat:@"modified: %@\n", dateToISO(modifiedDate)];
+        [content appendString:@"---\n\n"];
+
+        if (isMarkdown) {
+            NSString *body = noteToMarkdownString(note);
+            if (body) {
+                if (!preserveRoundTrip) {
+                    // Soft line breaks (U+2028, emitted as <br>) become
+                    // markdown hard breaks. unescapeMarkdown removes the
+                    // defensive backslash-escaping that exists for write-
+                    // markdown round-trip. Output is no longer round-trippable
+                    // but reads cleanly as plain text.
+                    body = [body stringByReplacingOccurrencesOfString:@"<br>" withString:@"  \n"];
+                    body = unescapeMarkdown(body);
+                }
+                [content appendString:body];
+            }
+        } else {
+            [content appendFormat:@"%@\n\n", title];
+            NSString *body = nil;
+            @try {
+                body = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("noteAsPlainTextWithoutTitle"));
+            } @catch (NSException *e) {}
+            if (body) [content appendString:body];
+        }
+        if (![content hasSuffix:@"\n"]) [content appendString:@"\n"];
+
+        NSError *writeErr = nil;
+        if (![content writeToFile:candidate atomically:YES encoding:NSUTF8StringEncoding error:&writeErr]) {
+            fprintf(stderr, "Failed to write %s: %s\n",
+                    [candidate UTF8String], [[writeErr localizedDescription] UTF8String]);
+            continue;
+        }
+        written++;
+    }
+
+    fprintf(stderr, "Exported %lu notes to %s\n", (unsigned long)written, [expandedOut UTF8String]);
+    if (skippedLocked > 0) {
+        fprintf(stderr, "Skipped %lu locked notes\n", (unsigned long)skippedLocked);
+    }
+    return 0;
+}
+
+
 // --- Usage ---
 
 static void usage(void) {
@@ -2125,6 +2305,17 @@ static void usage(void) {
     fprintf(stderr, "  notekit get-link --id <id>                     Get applenotes:// URL for note-to-note linking\n");
     fprintf(stderr, "  notekit create-folder --name <name> [--parent <parent-folder>]\n");
     fprintf(stderr, "  notekit delete-folder --name <name>\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Bulk export:\n");
+    fprintf(stderr, "  notekit export --output <dir> [--folder <name>] [--format md|txt]\n");
+    fprintf(stderr, "                 [--preserve-round-trip]\n");
+    fprintf(stderr, "      Writes one file per note with YAML frontmatter (title, folder, created,\n");
+    fprintf(stderr, "      modified). Mirrors folder hierarchy as subdirectories. Locked notes are\n");
+    fprintf(stderr, "      skipped with a warning. Default format is md.\n");
+    fprintf(stderr, "      By default, soft line breaks become markdown hard breaks and defensive\n");
+    fprintf(stderr,  "      backslash escaping is removed for clean human-readable output.\n");
+    fprintf(stderr, "      Use --preserve-round-trip to keep <br> tags and char escapes so the\n");
+    fprintf(stderr, "      output round-trips back through write-markdown.\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Debugging / Internals:\n");
     fprintf(stderr, "  These operate on character offsets into the raw attribute stream. You should\n");

@@ -2124,7 +2124,7 @@ static int cmdTest(id viewContext) {
             fc = YES;
             [filtered addObject:p];
         }
-        NSString *markdown = paraModelToMarkdown(filtered);
+        NSString *markdown = paraModelToMarkdown(filtered, NO);
         BOOL hasTitleMd = [markdown hasPrefix:@"# "];
         BOOL hasBody = [markdown containsString:@"Body text here"];
         if (hasTitleMd && hasBody) { fprintf(stderr, "  PASS\n"); passed++; }
@@ -2166,7 +2166,7 @@ static int cmdTest(id viewContext) {
             fc = YES;
             [filtered addObject:p];
         }
-        NSString *markdown = paraModelToMarkdown(filtered);
+        NSString *markdown = paraModelToMarkdown(filtered, NO);
         if ([markdown containsString:@"## My Heading"]) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
 
@@ -2205,7 +2205,7 @@ static int cmdTest(id viewContext) {
             fc = YES;
             [filtered addObject:p];
         }
-        NSString *markdown = paraModelToMarkdown(filtered);
+        NSString *markdown = paraModelToMarkdown(filtered, NO);
         if ([markdown containsString:@"- Dash item"]) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
 
@@ -2244,7 +2244,7 @@ static int cmdTest(id viewContext) {
             fc = YES;
             [filtered addObject:p];
         }
-        NSString *markdown = paraModelToMarkdown(filtered);
+        NSString *markdown = paraModelToMarkdown(filtered, NO);
         if ([markdown containsString:@"1. Numbered item"]) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
 
@@ -2297,7 +2297,7 @@ static int cmdTest(id viewContext) {
             fc = YES;
             [filtered addObject:p];
         }
-        NSString *markdown = paraModelToMarkdown(filtered);
+        NSString *markdown = paraModelToMarkdown(filtered, NO);
         BOOL hasUnchecked = [markdown containsString:@"- [ ] Unchecked item"];
         BOOL hasChecked = [markdown containsString:@"- [x] Checked item"];
         if (hasUnchecked && hasChecked) { fprintf(stderr, "  PASS\n"); passed++; }
@@ -2340,7 +2340,7 @@ static int cmdTest(id viewContext) {
             fc = YES;
             [filtered addObject:p];
         }
-        NSString *markdown = paraModelToMarkdown(filtered);
+        NSString *markdown = paraModelToMarkdown(filtered, NO);
         if ([markdown containsString:@"[Click here](https://example.com)"]) {
             fprintf(stderr, "  PASS\n"); passed++;
         } else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
@@ -2382,7 +2382,7 @@ static int cmdTest(id viewContext) {
             fc = YES;
             [filtered addObject:p];
         }
-        NSString *markdown = paraModelToMarkdown(filtered);
+        NSString *markdown = paraModelToMarkdown(filtered, NO);
         if ([markdown containsString:@"~~Struck text~~"]) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
 
@@ -2423,7 +2423,7 @@ static int cmdTest(id viewContext) {
             fc = YES;
             [filtered addObject:p];
         }
-        NSString *markdown = paraModelToMarkdown(filtered);
+        NSString *markdown = paraModelToMarkdown(filtered, NO);
         if ([markdown containsString:@"**Bold text**"]) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
 
@@ -2464,7 +2464,7 @@ static int cmdTest(id viewContext) {
             fc = YES;
             [filtered addObject:p];
         }
-        NSString *markdown = paraModelToMarkdown(filtered);
+        NSString *markdown = paraModelToMarkdown(filtered, NO);
         if ([markdown containsString:@"*Italic text*"]) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
 
@@ -2505,7 +2505,7 @@ static int cmdTest(id viewContext) {
             fc = YES;
             [filtered addObject:p];
         }
-        NSString *markdown = paraModelToMarkdown(filtered);
+        NSString *markdown = paraModelToMarkdown(filtered, NO);
         if ([markdown containsString:@"***Both text***"]) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
 
@@ -2546,7 +2546,7 @@ static int cmdTest(id viewContext) {
             fc = YES;
             [filtered addObject:p];
         }
-        NSString *markdown = paraModelToMarkdown(filtered);
+        NSString *markdown = paraModelToMarkdown(filtered, NO);
         if ([markdown containsString:@"<u>Underlined</u>"]) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (md: %s)\n", [markdown UTF8String]); failed++; }
 
@@ -2633,7 +2633,7 @@ static int cmdTest(id viewContext) {
             fc = YES;
             [filtered addObject:p];
         }
-        NSString *markdown = paraModelToMarkdown(filtered);
+        NSString *markdown = paraModelToMarkdown(filtered, NO);
         // Parse back
         NSArray *parsed = markdownToParaModel(markdown);
         // Compare models
@@ -2766,7 +2766,7 @@ static int cmdTest(id viewContext) {
         }
 
         // Also verify the markdown output isn't fragmented across many lines
-        NSString *fragMd = paraModelToMarkdown(fragFiltered);
+        NSString *fragMd = paraModelToMarkdown(fragFiltered, NO);
         if (![fragMd containsString:p1Joined]) {
             fragOk = NO;
             fprintf(stderr, "  FAIL: markdown missing '%s', got:\n%s\n",
@@ -3023,18 +3023,18 @@ static int cmdTest(id viewContext) {
         [viewContext save:nil];
     }
 
-    // Test: paraModelToMarkdownLoose — adjacent list items stay tight
+    // Test: blank-line mode — adjacent list items stay tight
     // The export pipeline emits paragraphs separated by blank lines for
     // CommonMark/GitHub rendering, except consecutive list items which
     // must remain tight so they render as a compact list.
-    fprintf(stderr, "Test: paraModelToMarkdownLoose tight list...\n");
+    fprintf(stderr, "Test: blank-line mode tight list...\n");
     {
         NSArray *model = @[
             @{@"style": @103, @"indent": @0, @"text": @"Item 1", @"todoChecked": @NO},
             @{@"style": @103, @"indent": @0, @"text": @"Item 2", @"todoChecked": @YES},
             @{@"style": @103, @"indent": @0, @"text": @"Item 3", @"todoChecked": @NO},
         ];
-        NSString *out = paraModelToMarkdownLoose(model);
+        NSString *out = paraModelToMarkdown(model, YES);
         NSString *expected = @"- [ ] Item 1\n- [x] Item 2\n- [ ] Item 3";
         if ([out isEqualToString:expected]) { fprintf(stderr, "  PASS\n"); passed++; }
         else {
@@ -3044,8 +3044,8 @@ static int cmdTest(id viewContext) {
         }
     }
 
-    // Test: paraModelToMarkdownLoose — body→list and list→body get blank lines
-    fprintf(stderr, "Test: paraModelToMarkdownLoose mixed transitions...\n");
+    // Test: blank-line mode — body→list and list→body get blank lines
+    fprintf(stderr, "Test: blank-line mode mixed transitions...\n");
     {
         NSArray *model = @[
             @{@"style": @3, @"indent": @0, @"text": @"Intro paragraph"},
@@ -3053,7 +3053,7 @@ static int cmdTest(id viewContext) {
             @{@"style": @103, @"indent": @0, @"text": @"List item B", @"todoChecked": @NO},
             @{@"style": @3, @"indent": @0, @"text": @"Closing paragraph"},
         ];
-        NSString *out = paraModelToMarkdownLoose(model);
+        NSString *out = paraModelToMarkdown(model, YES);
         NSString *expected = @"Intro paragraph\n\n- [ ] List item A\n- [ ] List item B\n\nClosing paragraph";
         if ([out isEqualToString:expected]) { fprintf(stderr, "  PASS\n"); passed++; }
         else {
@@ -3063,15 +3063,15 @@ static int cmdTest(id viewContext) {
         }
     }
 
-    // Test: paraModelToMarkdownLoose — body↔body uses blank lines
-    fprintf(stderr, "Test: paraModelToMarkdownLoose body separation...\n");
+    // Test: blank-line mode — body↔body uses blank lines
+    fprintf(stderr, "Test: blank-line mode body separation...\n");
     {
         NSArray *model = @[
             @{@"style": @3, @"indent": @0, @"text": @"First."},
             @{@"style": @3, @"indent": @0, @"text": @"Second."},
             @{@"style": @3, @"indent": @0, @"text": @"Third."},
         ];
-        NSString *out = paraModelToMarkdownLoose(model);
+        NSString *out = paraModelToMarkdown(model, YES);
         NSString *expected = @"First.\n\nSecond.\n\nThird.";
         if ([out isEqualToString:expected]) { fprintf(stderr, "  PASS\n"); passed++; }
         else {
@@ -3081,15 +3081,15 @@ static int cmdTest(id viewContext) {
         }
     }
 
-    // Test: paraModelToMarkdownLoose — heading gets blank line, no double-blank
-    fprintf(stderr, "Test: paraModelToMarkdownLoose heading separation...\n");
+    // Test: blank-line mode — heading gets blank line, no double-blank
+    fprintf(stderr, "Test: blank-line mode heading separation...\n");
     {
         NSArray *model = @[
             @{@"style": @3, @"indent": @0, @"text": @"Body before."},
             @{@"style": @1, @"indent": @0, @"text": @"My Heading"},
             @{@"style": @3, @"indent": @0, @"text": @"Body after."},
         ];
-        NSString *out = paraModelToMarkdownLoose(model);
+        NSString *out = paraModelToMarkdown(model, YES);
         NSString *expected = @"Body before.\n\n## My Heading\n\nBody after.";
         if ([out isEqualToString:expected]) { fprintf(stderr, "  PASS\n"); passed++; }
         else {
@@ -3099,17 +3099,17 @@ static int cmdTest(id viewContext) {
         }
     }
 
-    // Test: paraModelToMarkdownLoose — empty body paragraphs are skipped
+    // Test: blank-line mode — empty body paragraphs are skipped
     // The blank line is provided by the regular separator; intentional empty
     // paragraphs in the model don't produce extra newlines in loose mode.
-    fprintf(stderr, "Test: paraModelToMarkdownLoose skips empty paragraphs...\n");
+    fprintf(stderr, "Test: blank-line mode skips empty paragraphs...\n");
     {
         NSArray *model = @[
             @{@"style": @3, @"indent": @0, @"text": @"A"},
             @{@"style": @3, @"indent": @0, @"text": @""},
             @{@"style": @3, @"indent": @0, @"text": @"B"},
         ];
-        NSString *out = paraModelToMarkdownLoose(model);
+        NSString *out = paraModelToMarkdown(model, YES);
         NSString *expected = @"A\n\nB";
         if ([out isEqualToString:expected]) { fprintf(stderr, "  PASS\n"); passed++; }
         else {
@@ -3145,7 +3145,7 @@ static int cmdTest(id viewContext) {
         // Test 3: Round-trip: markdown -> model -> markdown
         NSString *md3 = @"# Title\n```\necho hello\n```\nBody after code";
         NSArray *parsed3 = markdownToParaModel(md3);
-        NSString *rt3 = paraModelToMarkdown(parsed3);
+        NSString *rt3 = paraModelToMarkdown(parsed3, NO);
         if (![rt3 isEqualToString:md3]) { ok = NO; fprintf(stderr, "    FAIL: round-trip mismatch:\n    got:  '%s'\n    want: '%s'\n", [rt3 UTF8String], [md3 UTF8String]); }
 
         // Test 4: Code block with language specifier (```bash)
@@ -3178,7 +3178,7 @@ static int cmdTest(id viewContext) {
         }
 
         // Test 7: Round-trip with multiple code blocks
-        NSString *rt6 = paraModelToMarkdown(parsed6);
+        NSString *rt6 = paraModelToMarkdown(parsed6, NO);
         if (![rt6 isEqualToString:md6]) { ok = NO; fprintf(stderr, "    FAIL: multiple round-trip:\n    got:  '%s'\n    want: '%s'\n", [rt6 UTF8String], [md6 UTF8String]); }
 
         // Test 8: Empty code block
@@ -3190,7 +3190,7 @@ static int cmdTest(id viewContext) {
             if (![parsed8[1][@"text"] isEqualToString:@""]) { ok = NO; fprintf(stderr, "    FAIL: empty code block: text is '%s', expected empty\n", [parsed8[1][@"text"] UTF8String]); }
         }
         // Empty code block round-trip
-        NSString *rt8 = paraModelToMarkdown(parsed8);
+        NSString *rt8 = paraModelToMarkdown(parsed8, NO);
         if (![rt8 isEqualToString:md8]) { ok = NO; fprintf(stderr, "    FAIL: empty code block round-trip:\n    got:  '%s'\n    want: '%s'\n", [rt8 UTF8String], [md8 UTF8String]); }
 
         // Test 9: Leading empty line in code block
@@ -3642,7 +3642,7 @@ static int cmdTest(id viewContext) {
             fc = YES;
             [filtered addObject:p];
         }
-        NSString *markdown = paraModelToMarkdown(filtered);
+        NSString *markdown = paraModelToMarkdown(filtered, NO);
         // The body lines should have escaped prefixes
         // The markdown output contains escaped body text lines
         // Find lines that should be escaped
@@ -3896,7 +3896,7 @@ static int cmdTest(id viewContext) {
         }
 
         // 3. Read as markdown
-        NSString *rtMarkdown = paraModelToMarkdown(origFiltered);
+        NSString *rtMarkdown = paraModelToMarkdown(origFiltered, NO);
 
         // 4. Create a new empty note and write the markdown to it
         id rtNewNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
@@ -4049,7 +4049,7 @@ static int cmdTest(id viewContext) {
                 biFC = YES;
                 [biFiltered addObject:p];
             }
-            NSString *biMarkdown = paraModelToMarkdown(biFiltered);
+            NSString *biMarkdown = paraModelToMarkdown(biFiltered, NO);
             BOOL biPass = [biMarkdown containsString:@"**bold word**"] &&
                           [biMarkdown containsString:@"*italic word*"] &&
                           [biMarkdown containsString:@"<u>underlined</u>"];

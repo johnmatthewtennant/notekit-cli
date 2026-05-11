@@ -1,7 +1,7 @@
 // Forward declaration: defined later in this file, used by write commands for readback
 static NSString *noteToMarkdownString(id note);
 
-static int cmdCreateEmpty(id viewContext, NSString *folderName) {
+static id createEmptyNoteInFolder(id viewContext, NSString *folderName) {
     id targetFolder = nil;
     NSArray *folders = fetchFolders(viewContext);
     for (id folder in folders) {
@@ -17,7 +17,30 @@ static int cmdCreateEmpty(id viewContext, NSString *folderName) {
     NSError *error = nil;
     [viewContext save:&error];
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
+    return note;
+}
 
+static NSDictionary *noteLinkDict(id note) {
+    NSString *identifier = noteToDict(note)[@"id"];
+
+    Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities");
+    if (!ICAppURLUtilities) errorExit(@"ICAppURLUtilities class not available");
+
+    NSURL *appURL = ((id (*)(id, SEL, id))objc_msgSend)(
+        ICAppURLUtilities, sel_registerName("appURLForNote:"), note);
+    if (!appURL) errorExit(@"Failed to generate note link URL");
+
+    NSString *title = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("titleForLinking"));
+
+    return @{
+        @"id": identifier ?: @"",
+        @"title": title ?: @"",
+        @"url": [appURL absoluteString] ?: @""
+    };
+}
+
+static int cmdCreateEmpty(id viewContext, NSString *folderName) {
+    id note = createEmptyNoteInFolder(viewContext, folderName);
     NSMutableDictionary *result = [noteToDict(note) mutableCopy];
     result[@"content"] = noteToMarkdownString(note);
     printJSON(result);
@@ -2040,6 +2063,54 @@ static int cmdWriteMarkdownNote(id note, id viewContext, BOOL dryRun, BOOL backu
     return cmdWriteMarkdownWithString(note, viewContext, markdown, dryRun, backup, diffMode);
 }
 
+static int cmdCreateMarkdown(id viewContext, NSString *folderName, NSString *title, BOOL diffMode) {
+    if ([title rangeOfString:@"\n"].location != NSNotFound ||
+        [title rangeOfString:@"\r"].location != NSNotFound) {
+        errorExit(@"--title must be a single line");
+    }
+
+    NSFileHandle *input = [NSFileHandle fileHandleWithStandardInput];
+    NSData *data = [input readDataToEndOfFile];
+    NSString *markdown = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (!markdown) errorExit(@"Failed to read markdown from stdin (invalid UTF-8)");
+
+    id note = createEmptyNoteInFolder(viewContext, folderName);
+
+    NSMutableDictionary *titlePara = [NSMutableDictionary dictionary];
+    titlePara[@"style"] = @(0);
+    titlePara[@"indent"] = @(0);
+    titlePara[@"text"] = title;
+
+    NSMutableArray *model = [NSMutableArray arrayWithObject:titlePara];
+    [model addObjectsFromArray:markdownToParaModel(markdown)];
+
+    NSString *identifier = noteToDict(note)[@"id"];
+    int savedStdout = dup(STDOUT_FILENO);
+    int devNull = open("/dev/null", O_WRONLY);
+    if (savedStdout < 0 || devNull < 0) {
+        if (savedStdout >= 0) close(savedStdout);
+        if (devNull >= 0) close(devNull);
+        errorExit(@"Failed to prepare create-markdown output");
+    }
+    dup2(devNull, STDOUT_FILENO);
+    if (devNull >= 0) close(devNull);
+
+    int writeResult = diffMode
+        ? cmdWriteMarkdownDiff(note, viewContext, identifier, model, NO, NO)
+        : cmdWriteMarkdownFullReplace(note, viewContext, identifier, model, NO, NO);
+    fflush(stdout);
+    if (savedStdout >= 0) {
+        dup2(savedStdout, STDOUT_FILENO);
+        close(savedStdout);
+    }
+    if (writeResult != 0) return writeResult;
+
+    note = findNoteByID(viewContext, identifier);
+    if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", identifier]);
+    printJSON(noteLinkDict(note));
+    return 0;
+}
+
 
 
 // --- Install Skill ---
@@ -2408,6 +2479,7 @@ static void usage(void) {
     fprintf(stderr, "Reading and writing notes (recommended):\n");
     fprintf(stderr, "  notekit read-markdown (--title <title> | --id <id>) [--folder <name>]\n");
     fprintf(stderr, "  notekit write-markdown --id <id> [--dry-run] [--backup] [--diff]    Read markdown from stdin, replace note content\n");
+    fprintf(stderr, "  notekit create-markdown --folder <name> --title <title> [--diff]    Create note from stdin markdown, output id/title/url\n");
     fprintf(stderr, "  notekit create --folder <name> --title <title> [--body <text>] [--style <n>]\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Browsing and organizing:\n");
@@ -2470,5 +2542,3 @@ static void usage(void) {
     fprintf(stderr, "\nReport issues:\n");
     fprintf(stderr, "  gh api repos/johnmatthewtennant/notekit-cli/issues --method POST -f title=\"...\" -f body=\"...\"\n");
 }
-
-

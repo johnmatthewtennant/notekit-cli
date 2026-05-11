@@ -46,6 +46,7 @@ Convenience (composed from primitives):
   notekit read-structured (--title <title> | --id <id>) [--folder <name>]
   notekit read-markdown (--title <title> | --id <id>) [--folder <name>]
   notekit write-markdown --id <id> [--dry-run] [--backup]
+  notekit create-markdown --folder <name> --title <title>
   notekit duplicate --id <id> [--new-title <new-title>]
   notekit delete-line --id <id> --search-text <search-text>
   notekit add-link --id <id> --target <id> [--text <text>] [--position <n>]

@@ -4334,6 +4334,43 @@ static int cmdTest(id viewContext) {
         }
     }
 
+    // Test: create-markdown convenience command
+    fprintf(stderr, "Test: create-markdown...\n");
+    {
+        NSString *createTitle = @"__create_markdown_test__";
+        NSString *cmd = [NSString stringWithFormat:@"/usr/bin/printf '## Heading\\n- [x] Done\\nBody **bold**\\n' | '%s' create-markdown --folder '%@' --title '%@' 2>/dev/null",
+            exePath, testFolderName, createTitle];
+        NSMutableData *outData = nil;
+        RUN_CAPTURE(cmd, outData);
+        id parsed = outData.length > 0 ? [NSJSONSerialization JSONObjectWithData:outData options:0 error:nil] : nil;
+        id createdNote = findNote(viewContext, createTitle, testFolderName);
+        if (parsed && createdNote &&
+            [parsed[@"id"] isKindOfClass:[NSString class]] &&
+            [parsed[@"title"] isEqualToString:createTitle] &&
+            [parsed[@"url"] containsString:@"applenotes://showNote?identifier="]) {
+            NSArray *paras = noteToParaModel(createdNote);
+            BOOL foundTitle = NO, foundHeading = NO, foundChecklist = NO, foundBody = NO;
+            for (NSDictionary *para in paras) {
+                NSString *text = para[@"text"];
+                NSInteger style = [para[@"style"] integerValue];
+                if ([text isEqualToString:createTitle] && style == 0) foundTitle = YES;
+                if ([text isEqualToString:@"Heading"] && style == 1) foundHeading = YES;
+                if ([text isEqualToString:@"Done"] && style == 103 && [para[@"todoChecked"] boolValue]) foundChecklist = YES;
+                if ([text isEqualToString:@"Body bold"] && style == 3) foundBody = YES;
+            }
+            if (foundTitle && foundHeading && foundChecklist && foundBody) {
+                fprintf(stderr, "  PASS\n"); passed++;
+            } else {
+                fprintf(stderr, "  FAIL (title=%d heading=%d checklist=%d body=%d)\n",
+                    foundTitle, foundHeading, foundChecklist, foundBody); failed++;
+            }
+            deleteNote(createdNote, viewContext);
+            [viewContext save:nil];
+        } else {
+            fprintf(stderr, "  FAIL (bad JSON or note missing)\n"); failed++;
+        }
+    }
+
     // Test: search-offset (exact match)
     fprintf(stderr, "Test: search-offset (exact match)...\n");
     {
@@ -4607,5 +4644,4 @@ static int cmdTest(id viewContext) {
     fprintf(stderr, "\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
 }
-
 

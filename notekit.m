@@ -40,6 +40,7 @@ int main(int argc, const char *argv[]) {
                     [flag isEqualToString:@"body-offset"] ||
                     [flag isEqualToString:@"dry-run"] ||
                     [flag isEqualToString:@"backup"] ||
+                    [flag isEqualToString:@"diff"] ||
                     [flag isEqualToString:@"case-insensitive"] ||
                     [flag isEqualToString:@"preserve-round-trip"]) {
                     opts[flag] = @"true";
@@ -59,7 +60,7 @@ int main(int argc, const char *argv[]) {
             @"folders", @"list", @"get", @"read", @"read-attrs", @"read-structured",
             @"read-markdown", @"write-markdown", @"set-attr", @"move", @"search",
             @"pin", @"unpin", @"duplicate", @"create-folder", @"delete-folder",
-            @"create-empty", @"create", @"delete", @"append", @"insert",
+            @"create-empty", @"create", @"create-markdown", @"delete", @"append", @"insert",
             @"delete-range", @"search-offset", @"replace", @"delete-line",
             @"get-link", @"add-link", @"add-note-link",
             @"export", @"install-skill", @"test", nil];
@@ -215,6 +216,12 @@ int main(int argc, const char *argv[]) {
         } else if ([command isEqualToString:@"create-empty"]) {
             if (!folderName) { fprintf(stderr, "Error: --folder required\n"); usage(); return 1; }
             return cmdCreateEmpty(viewContext, folderName);
+
+        } else if ([command isEqualToString:@"create-markdown"]) {
+            if (!folderName) { fprintf(stderr, "Error: --folder required\n"); usage(); return 1; }
+            if (!kwTitle) { fprintf(stderr, "Error: --title required\n"); usage(); return 1; }
+            BOOL diffMode = [opts[@"diff"] isEqualToString:@"true"];
+            return cmdCreateMarkdown(viewContext, folderName, kwTitle, diffMode);
 
         } else if ([command isEqualToString:@"create"]) {
             if (!folderName) { fprintf(stderr, "Error: --folder required\n"); usage(); return 1; }

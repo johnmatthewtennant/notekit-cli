@@ -2527,6 +2527,7 @@ static void usage(void) {
     fprintf(stderr, "  notekit delete-line --id <id> --search-text <search-text>\n");
     fprintf(stderr, "  notekit add-link --id <id> --target <id> [--text <text>] [--position <n>]   Insert note-to-note link\n");
     fprintf(stderr, "  notekit add-note-link --id <id> --target <id> [--position <n>]            Insert native ICInlineAttachment note link\n");
+    fprintf(stderr, "  notekit version [--skip-check]                     Print installed version and check for updates\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "  --body-offset    Treat offset/position/start as relative to body text (after title).\n");
     fprintf(stderr, "                   Use this when offsets come from 'notekit read' output.\n");

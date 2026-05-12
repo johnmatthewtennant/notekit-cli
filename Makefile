@@ -3,7 +3,7 @@ CFLAGS = -framework Foundation -framework CoreData -lobjc -O2
 
 all: notekit
 
-notekit: notekit.m notekit-generated.m notekit-handwritten.m notekit-tests.m
+notekit: notekit.m notekit-version-check.m notekit-generated.m notekit-handwritten.m notekit-tests.m
 	$(CC) $(CFLAGS) $< -o $@
 
 notes-inspect: notes-inspect.m

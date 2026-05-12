@@ -8,6 +8,7 @@
 #include <mach-o/dyld.h>
 #include <fcntl.h>
 
+#include "notekit-version-check.m"
 #include "notekit-generated.m"
 #include "notekit-handwritten.m"
 #include "notekit-tests.m"
@@ -22,6 +23,7 @@ int main(int argc, const char *argv[]) {
 
         // Handle --help as first argument (before parsing other flags)
         if ([command isEqualToString:@"--help"] || [command isEqualToString:@"-h"]) { usage(); return 0; }
+        if ([command isEqualToString:@"--version"]) { return cmdVersion(YES); }
 
         // Parse arguments
         NSMutableArray *positional = [NSMutableArray array];
@@ -54,6 +56,9 @@ int main(int argc, const char *argv[]) {
 
         // Handle --help before loading frameworks
         if ([opts[@"help"] isEqualToString:@"true"]) { usage(); return 0; }
+        if ([command isEqualToString:@"version"]) {
+            return cmdVersion([opts[@"skip-check"] isEqualToString:@"true"]);
+        }
 
         // Validate command name before loading frameworks
         NSSet *knownCommands = [NSSet setWithObjects:
@@ -63,12 +68,14 @@ int main(int argc, const char *argv[]) {
             @"create-empty", @"create", @"create-markdown", @"delete", @"append", @"insert",
             @"delete-range", @"search-offset", @"replace", @"delete-line",
             @"get-link", @"add-link", @"add-note-link",
-            @"export", @"install-skill", @"test", nil];
+            @"export", @"install-skill", @"version", @"test", nil];
         if (![knownCommands containsObject:command]) {
             fprintf(stderr, "Unknown command: %s\n", [command UTF8String]);
             usage();
             return 1;
         }
+
+        attemptBackgroundUpgrade();
 
         // Reject unexpected positional arguments before loading frameworks
         if (positional.count > 0 &&

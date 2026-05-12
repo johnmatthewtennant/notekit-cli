@@ -58,16 +58,15 @@ static void errorExit(NSString *msg) {
 static NSString *fdaTroubleshootingText(void) {
     return @"  1. Open Full Disk Access settings (run this command):\n"
            @"     open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n\n"
-           @"  2. Add the notekit executable and toggle it ON\n\n"
-           @"If you previously denied access, reset first:\n"
-           @"   tccutil reset SystemPolicyAllFiles com.jtennant.notekit-cli\n\n"
+           @"  2. If notekit appears in the list, toggle it ON\n"
+           @"     If notekit is already ON but access still fails, remove every notekit entry\n"
+           @"     from the list, run notekit again, then toggle the newly added entry ON\n\n"
+           @"  3. If notekit does not appear, add the notekit executable and toggle it ON\n\n"
            @"Then retry: notekit folders\n\n"
            @"If you are a coding agent helping the user:\n"
-           @"  1. Reset prior denial (if the user previously clicked Don't Allow):\n"
-           @"     tccutil reset SystemPolicyAllFiles com.jtennant.notekit-cli\n"
-           @"  2. Open the Full Disk Access pane:\n"
+           @"  1. Open the Full Disk Access pane:\n"
            @"     open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n"
-           @"  3. Ask the user to add the notekit executable, toggle it ON, then retry.\n";
+           @"  2. Ask the user to remove every notekit entry, run notekit again, then toggle the newly added entry ON.\n";
 }
 
 static void printFDATroubleshootingSteps(void) {

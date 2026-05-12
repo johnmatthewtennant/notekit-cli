@@ -4601,15 +4601,16 @@ static int cmdTest(id viewContext) {
         fprintf(stderr, "fdaTroubleshootingText: contains agent instructions...");
         NSString *text = fdaTroubleshootingText();
         BOOL hasAgentHeader = [text containsString:@"coding agent helping the user"];
-        BOOL hasExecutable = [text containsString:@"Add the notekit executable"];
-        BOOL hasTccutil = [text containsString:@"tccutil reset SystemPolicyAllFiles com.jtennant.notekit-cli"];
+        BOOL hasExecutable = [text containsString:@"add the notekit executable"];
+        BOOL hasRemoveEntries = [text containsString:@"remove every notekit entry"];
         BOOL hasOpenSettings = [text containsString:@"x-apple.systempreferences"];
-        BOOL hasToggle = [text containsString:@"toggle it ON"];
-        if (hasAgentHeader && hasExecutable && hasTccutil && hasOpenSettings && hasToggle) {
+        BOOL hasRunAgain = [text containsString:@"run notekit again"];
+        BOOL hasToggle = [text containsString:@"toggle the newly added entry ON"];
+        if (hasAgentHeader && hasExecutable && hasRemoveEntries && hasOpenSettings && hasRunAgain && hasToggle) {
             fprintf(stderr, "  PASS\n"); passed++;
         } else {
-            fprintf(stderr, "  FAIL (header=%d, executable=%d, tccutil=%d, settings=%d, toggle=%d)\n",
-                hasAgentHeader, hasExecutable, hasTccutil, hasOpenSettings, hasToggle);
+            fprintf(stderr, "  FAIL (header=%d, executable=%d, remove=%d, settings=%d, run=%d, toggle=%d)\n",
+                hasAgentHeader, hasExecutable, hasRemoveEntries, hasOpenSettings, hasRunAgain, hasToggle);
             failed++;
         }
     }

@@ -8,6 +8,7 @@
 #include <mach-o/dyld.h>
 #include <fcntl.h>
 
+#include "disclaim.h"
 #include "notekit-version-check.m"
 #include "notekit-generated.m"
 #include "notekit-handwritten.m"
@@ -96,6 +97,8 @@ int main(int argc, const char *argv[]) {
             if (!wantClaude && !wantAgents) { wantClaude = YES; wantAgents = YES; }
             return cmdInstallSkill(wantClaude, wantAgents, force);
         }
+
+        notekit_disclaim_if_needed(argc, (char **)argv);
 
         // Load NotesShared framework and CoreData context (only for commands that need it)
         loadFramework();

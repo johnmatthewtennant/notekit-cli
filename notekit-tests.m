@@ -4601,15 +4601,15 @@ static int cmdTest(id viewContext) {
         fprintf(stderr, "fdaTroubleshootingText: contains agent instructions...");
         NSString *text = fdaTroubleshootingText();
         BOOL hasAgentHeader = [text containsString:@"coding agent helping the user"];
-        BOOL hasBundleId = [text containsString:@"osascript -e 'id of app"];
-        BOOL hasTccutil = [text containsString:@"tccutil reset SystemPolicyAllFiles"];
+        BOOL hasExecutable = [text containsString:@"Add the notekit executable"];
+        BOOL hasTccutil = [text containsString:@"tccutil reset SystemPolicyAllFiles com.jtennant.notekit-cli"];
         BOOL hasOpenSettings = [text containsString:@"x-apple.systempreferences"];
-        BOOL hasIDEMention = [text containsString:@"Cursor, VS Code"];
-        if (hasAgentHeader && hasBundleId && hasTccutil && hasOpenSettings && hasIDEMention) {
+        BOOL hasToggle = [text containsString:@"toggle it ON"];
+        if (hasAgentHeader && hasExecutable && hasTccutil && hasOpenSettings && hasToggle) {
             fprintf(stderr, "  PASS\n"); passed++;
         } else {
-            fprintf(stderr, "  FAIL (header=%d, bundle=%d, tccutil=%d, settings=%d, ide=%d)\n",
-                hasAgentHeader, hasBundleId, hasTccutil, hasOpenSettings, hasIDEMention);
+            fprintf(stderr, "  FAIL (header=%d, executable=%d, tccutil=%d, settings=%d, toggle=%d)\n",
+                hasAgentHeader, hasExecutable, hasTccutil, hasOpenSettings, hasToggle);
             failed++;
         }
     }

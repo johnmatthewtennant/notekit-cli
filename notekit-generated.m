@@ -58,23 +58,16 @@ static void errorExit(NSString *msg) {
 static NSString *fdaTroubleshootingText(void) {
     return @"  1. Open Full Disk Access settings (run this command):\n"
            @"     open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n\n"
-           @"  2. Add your terminal app (e.g. iTerm, Terminal, Ghostty) and toggle it ON\n\n"
+           @"  2. Add the notekit executable and toggle it ON\n\n"
            @"If you previously denied access, reset first:\n"
-           @"   tccutil reset SystemPolicyAllFiles <bundle-id>\n\n"
-           @"   Find your terminal's bundle ID:\n"
-           @"   osascript -e 'id of app \"iTerm\"'  (replace iTerm with your terminal app name)\n\n"
-           @"   Then re-open settings and toggle your terminal ON:\n"
-           @"     open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n\n"
+           @"   tccutil reset SystemPolicyAllFiles com.jtennant.notekit-cli\n\n"
            @"Then retry: notekit folders\n\n"
            @"If you are a coding agent helping the user:\n"
-           @"  1. Find the host app bundle ID (terminal or IDE that runs notekit):\n"
-           @"     osascript -e 'id of app \"Terminal\"'\n"
-           @"     (replace Terminal with the actual app: iTerm, Ghostty, Cursor, VS Code, etc.)\n"
-           @"  2. Reset prior denial (if user previously clicked Don't Allow):\n"
-           @"     tccutil reset SystemPolicyAllFiles <bundle-id>\n"
-           @"  3. Open the Full Disk Access pane:\n"
+           @"  1. Reset prior denial (if the user previously clicked Don't Allow):\n"
+           @"     tccutil reset SystemPolicyAllFiles com.jtennant.notekit-cli\n"
+           @"  2. Open the Full Disk Access pane:\n"
            @"     open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n"
-           @"  4. Ask the user to toggle their app ON in the list, then retry.\n";
+           @"  3. Ask the user to add the notekit executable, toggle it ON, then retry.\n";
 }
 
 static void printFDATroubleshootingSteps(void) {

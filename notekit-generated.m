@@ -58,15 +58,13 @@ static void errorExit(NSString *msg) {
 static NSString *fdaTroubleshootingText(void) {
     return @"  1. Open Full Disk Access settings (run this command):\n"
            @"     open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n\n"
-           @"  2. If notekit appears in the list, toggle it ON\n"
-           @"     If notekit is already ON but access still fails, remove every notekit entry\n"
-           @"     from the list, run notekit again, then toggle the newly added entry ON\n\n"
-           @"  3. If notekit does not appear, add the notekit executable and toggle it ON\n\n"
+           @"  2. Add the app that launched notekit and toggle it ON\n"
+           @"     Examples: Terminal, iTerm, Ghostty, VS Code, Cursor, or Claude\n\n"
+           @"  3. If access still fails, remove stale notekit entries from the list\n"
+           @"     and make sure the launching app is toggled ON\n\n"
            @"Then retry: notekit folders\n\n"
-           @"If you are a coding agent helping the user:\n"
-           @"  1. Open the Full Disk Access pane:\n"
-           @"     open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n"
-           @"  2. Ask the user to remove every notekit entry, run notekit again, then toggle the newly added entry ON.\n";
+           @"If you run notekit with NOTEKIT_SELF_DISCLAIM=1:\n"
+           @"  Grant Full Disk Access to the notekit entry instead of the launching app.\n";
 }
 
 static void printFDATroubleshootingSteps(void) {

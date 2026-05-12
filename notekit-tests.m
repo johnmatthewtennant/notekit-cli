@@ -4600,17 +4600,16 @@ static int cmdTest(id viewContext) {
     {
         fprintf(stderr, "fdaTroubleshootingText: contains agent instructions...");
         NSString *text = fdaTroubleshootingText();
-        BOOL hasAgentHeader = [text containsString:@"coding agent helping the user"];
-        BOOL hasExecutable = [text containsString:@"add the notekit executable"];
-        BOOL hasRemoveEntries = [text containsString:@"remove every notekit entry"];
+        BOOL hasLauncher = [text containsString:@"Add the app that launched notekit"];
+        BOOL hasExamples = [text containsString:@"Terminal, iTerm, Ghostty, VS Code, Cursor, or Claude"];
         BOOL hasOpenSettings = [text containsString:@"x-apple.systempreferences"];
-        BOOL hasRunAgain = [text containsString:@"run notekit again"];
-        BOOL hasToggle = [text containsString:@"toggle the newly added entry ON"];
-        if (hasAgentHeader && hasExecutable && hasRemoveEntries && hasOpenSettings && hasRunAgain && hasToggle) {
+        BOOL hasSelfDisclaim = [text containsString:@"NOTEKIT_SELF_DISCLAIM=1"];
+        BOOL hasNotekitFallback = [text containsString:@"Grant Full Disk Access to the notekit entry"];
+        if (hasLauncher && hasExamples && hasOpenSettings && hasSelfDisclaim && hasNotekitFallback) {
             fprintf(stderr, "  PASS\n"); passed++;
         } else {
-            fprintf(stderr, "  FAIL (header=%d, executable=%d, remove=%d, settings=%d, run=%d, toggle=%d)\n",
-                hasAgentHeader, hasExecutable, hasRemoveEntries, hasOpenSettings, hasRunAgain, hasToggle);
+            fprintf(stderr, "  FAIL (launcher=%d, examples=%d, settings=%d, selfDisclaim=%d, notekit=%d)\n",
+                hasLauncher, hasExamples, hasOpenSettings, hasSelfDisclaim, hasNotekitFallback);
             failed++;
         }
     }

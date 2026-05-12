@@ -19,7 +19,7 @@ extern const char notekit_info_plist_section_start __asm("section$start$__TEXT$_
 extern const char notekit_info_plist_section_end   __asm("section$end$__TEXT$__info_plist");
 
 static const char *kReentryEnvVar = "NOTEKIT_DISCLAIMED";
-static const char *kBypassEnvVar = "NOTEKIT_NO_DISCLAIM";
+static const char *kOptInEnvVar = "NOTEKIT_SELF_DISCLAIM";
 
 static volatile pid_t g_child_pid = 0;
 
@@ -65,7 +65,7 @@ void notekit_disclaim_if_needed(int argc, char *argv[]) {
         return;
     }
 
-    if (getenv(kBypassEnvVar) != NULL) {
+    if (getenv(kOptInEnvVar) == NULL) {
         return;
     }
 

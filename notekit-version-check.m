@@ -1,6 +1,6 @@
 // Version checks and background Homebrew upgrades.
 
-static NSString * const NotekitCurrentVersion = @"0.5.72";
+static NSString * const NotekitCurrentVersion = @"0.5.73";
 static NSString * const NotekitFormulaURL = @"https://raw.githubusercontent.com/johnmatthewtennant/homebrew-tap/master/Formula/notekit-cli.rb";
 static NSString * const NotekitFormulaTap = @"johnmatthewtennant/tap/notekit-cli";
 static NSString * const NotekitFormulaName = @"notekit-cli";

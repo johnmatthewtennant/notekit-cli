@@ -1966,6 +1966,47 @@ static int cmdTest(id viewContext) {
         } else { fprintf(stderr, "  FAIL (not found)\n"); failed++; }
     }
 
+    // Test: set-attr --color
+    fprintf(stderr, "Test: set-attr --color...\n");
+    {
+        id note = findNote(viewContext, testTitle, testFolderName);
+        if (note) {
+            NSString *noteID = noteToDict(note)[@"id"];
+            NSUInteger bodyOff = bodyOffsetForNote(note);
+            NSDictionary *attrOpts = @{@"color": @"#a371f7", @"body-offset": @"true"};
+            int ret = cmdSetAttr(viewContext, noteID, 0, 5, attrOpts);
+            if (ret == 0) {
+                note = findNoteByID(viewContext, noteID);
+                id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+                id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+                NSRange effectiveRange;
+                NSDictionary *attrs = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(ms, sel_registerName("attributesAtIndex:effectiveRange:"), bodyOff, &effectiveRange);
+                NSString *colorHex = hexStringForColor(attrs[@"TTColor"] ?: attrs[NSForegroundColorAttributeName]);
+                if ([colorHex isEqualToString:@"#a371f7"]) {
+                    fprintf(stderr, "  PASS\n"); passed++;
+                } else {
+                    fprintf(stderr, "  FAIL (color=%s)\n", colorHex ? [colorHex UTF8String] : "(nil)"); failed++;
+                }
+            } else { fprintf(stderr, "  FAIL (ret=%d)\n", ret); failed++; }
+
+            NSDictionary *removeOpts = @{@"color": @"reset", @"body-offset": @"true"};
+            ret = cmdSetAttr(viewContext, noteID, 0, 5, removeOpts);
+            if (ret == 0) {
+                note = findNoteByID(viewContext, noteID);
+                id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+                id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+                NSRange effectiveRange;
+                NSDictionary *attrs = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(ms, sel_registerName("attributesAtIndex:effectiveRange:"), bodyOff, &effectiveRange);
+                NSString *colorHex = hexStringForColor(attrs[@"TTColor"] ?: attrs[NSForegroundColorAttributeName]);
+                if (!colorHex) {
+                    fprintf(stderr, "  PASS (reset)\n"); passed++;
+                } else {
+                    fprintf(stderr, "  FAIL (color still present: %s)\n", [colorHex UTF8String]); failed++;
+                }
+            } else { fprintf(stderr, "  FAIL reset (ret=%d)\n", ret); failed++; }
+        } else { fprintf(stderr, "  FAIL (not found)\n"); failed++; }
+    }
+
     // Test: set-attr --strikethrough invalid value (subprocess)
     fprintf(stderr, "Test: set-attr --strikethrough invalid value...\n");
     {
@@ -2580,6 +2621,42 @@ static int cmdTest(id viewContext) {
         if (plainOk && runsOk) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (plain=%s, bold=%d, italic=%d, both=%d, underline=%d)\n",
             [plain UTF8String], foundBold, foundItalic, foundBoth, foundUnderline); failed++; }
+    }
+
+    // Test: color span parse round-trip
+    fprintf(stderr, "Test: color span parse round-trip...\n");
+    {
+        NSString *input = @"<span style=\"color:#a371f7\">**purple bold**</span>";
+        NSMutableString *plain = [NSMutableString string];
+        NSMutableArray *runs = [NSMutableArray array];
+        parseInlineFormatting(input, plain, runs);
+
+        BOOL plainOk = [plain isEqualToString:@"purple bold"];
+        BOOL foundColor = NO;
+        for (NSDictionary *run in runs) {
+            NSString *text = [plain substringWithRange:NSMakeRange([run[@"start"] unsignedIntegerValue], [run[@"length"] unsignedIntegerValue])];
+            if ([text isEqualToString:@"purple bold"] &&
+                [run[@"bold"] boolValue] &&
+                [run[@"color"] isEqualToString:@"#a371f7"]) {
+                foundColor = YES;
+            }
+        }
+        if (plainOk && foundColor) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL (plain=%s, color=%d)\n", [plain UTF8String], foundColor); failed++; }
+    }
+
+    // Test: markdown model preserves color spans
+    fprintf(stderr, "Test: markdown color model...\n");
+    {
+        NSArray *model = markdownToParaModel(@"plain <span style=\"color:#a371f7\">purple</span>");
+        BOOL foundColor = NO;
+        if (model.count == 1) {
+            for (NSDictionary *run in model[0][@"runs"]) {
+                if ([run[@"color"] isEqualToString:@"#a371f7"]) foundColor = YES;
+            }
+        }
+        if (foundColor) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL\n"); failed++; }
     }
 
     // Test: markdown escape/unescape round-trip
@@ -4035,8 +4112,8 @@ static int cmdTest(id viewContext) {
             ((void (*)(id, SEL))objc_msgSend)(biNote, sel_registerName("saveNoteData"));
             [viewContext save:nil];
 
-            // Write markdown with bold, italic and underline
-            NSString *biMd = [NSString stringWithFormat:@"# %@\n**bold word** and *italic word* and <u>underlined</u>", biTitle];
+            // Write markdown with bold, italic, underline, and color
+            NSString *biMd = [NSString stringWithFormat:@"# %@\n**bold word** and *italic word* and <u>underlined</u> and <span style=\"color:#a371f7\">purple</span>", biTitle];
             cmdWriteMarkdownWithString(biNote, viewContext, biMd, NO, NO, NO);
             [viewContext save:nil];
 
@@ -4052,7 +4129,8 @@ static int cmdTest(id viewContext) {
             NSString *biMarkdown = paraModelToMarkdown(biFiltered, NO);
             BOOL biPass = [biMarkdown containsString:@"**bold word**"] &&
                           [biMarkdown containsString:@"*italic word*"] &&
-                          [biMarkdown containsString:@"<u>underlined</u>"];
+                          [biMarkdown containsString:@"<u>underlined</u>"] &&
+                          [biMarkdown containsString:@"<span style=\"color:#a371f7\">purple</span>"];
             if (biPass) { fprintf(stderr, "  PASS\n"); passed++; }
             else { fprintf(stderr, "  FAIL (md: %s)\n", [biMarkdown UTF8String]); failed++; }
 
@@ -4644,4 +4722,3 @@ static int cmdTest(id viewContext) {
     fprintf(stderr, "\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
 }
-

@@ -31,7 +31,7 @@ Primitives:
   notekit append --id <id> --text <text> [--style <n>]
   notekit insert --id <id> --text <text> --position <n> [--style <n>] [--body-offset]
   notekit delete-range --id <id> --start <n> --length <n> [--body-offset]
-  notekit set-attr --id <id> --offset <n> --length <n> [--style <n>] [--indent <n>] [--todo-done true|false] [--link <url>] [--body-offset]
+  notekit set-attr --id <id> --offset <n> --length <n> [--style <n>] [--indent <n>] [--todo-done true|false] [--link <url>] [--strikethrough true|false] [--color <hex|reset>] [--body-offset]
   notekit move --id <id> --to <to-folder>
   notekit create-folder --name <name>
   notekit delete-folder --name <name>
@@ -66,6 +66,16 @@ Convenience (composed from primitives):
 ```bash
 notekit get --title "Target Note" | jq -r .id
 ```
+
+## Inline color
+
+`read-markdown` emits character color as HTML spans:
+
+```markdown
+<span style="color:#a371f7">colored text</span>
+```
+
+`write-markdown` accepts the same syntax, and `set-attr --color "#a371f7"` applies color directly. Use `set-attr --color reset` to remove color.
 
 ## Private API Notice
 

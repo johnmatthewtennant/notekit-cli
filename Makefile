@@ -1,5 +1,5 @@
 CC = clang
-CFLAGS = -framework Foundation -framework CoreData -lobjc -O2
+CFLAGS = -framework Foundation -framework CoreData -framework AppKit -lobjc -O2
 INFO_PLIST = Info.plist
 BUNDLE_ID = com.jtennant.notekit-cli
 INFO_PLIST_FLAGS = -Wl,-sectcreate,__TEXT,__info_plist,$(INFO_PLIST)

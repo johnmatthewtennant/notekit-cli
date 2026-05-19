@@ -2,6 +2,7 @@
 // Originally scaffolded by generate-notes-cli.py — now maintained manually
 
 #import <Foundation/Foundation.h>
+#import <AppKit/AppKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <CoreData/CoreData.h>

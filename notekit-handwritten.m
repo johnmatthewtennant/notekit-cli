@@ -357,6 +357,31 @@ static NSString *normalizeParaText(NSString *text) {
     return [text substringToIndex:range.location + range.length];
 }
 
+static NSString *colorHexFromSpanTag(NSString *tag) {
+    NSRange colorRange = [tag rangeOfString:@"color:" options:NSCaseInsensitiveSearch];
+    if (colorRange.location == NSNotFound) return nil;
+
+    NSUInteger i = colorRange.location + colorRange.length;
+    while (i < tag.length && [[NSCharacterSet whitespaceCharacterSet] characterIsMember:[tag characterAtIndex:i]]) i++;
+
+    NSUInteger start = i;
+    if (i < tag.length && [tag characterAtIndex:i] == '#') i++;
+    NSUInteger hexStart = i;
+    while (i < tag.length) {
+        unichar ch = [tag characterAtIndex:i];
+        BOOL isHex = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
+        if (!isHex) break;
+        i++;
+    }
+    NSUInteger hexLen = i - hexStart;
+    if (hexLen != 3 && hexLen != 6) return nil;
+
+    NSString *candidate = [tag substringWithRange:NSMakeRange(start, i - start)];
+    NSString *normalized = nil;
+    if (!parseHexColor(candidate, &normalized, nil)) return nil;
+    return normalized;
+}
+
 static BOOL isAllowedLinkScheme(NSURL *url) {
     NSString *scheme = [url.scheme lowercaseString];
     return [scheme isEqualToString:@"http"] ||
@@ -409,6 +434,7 @@ static void emitParagraph(NSMutableArray *paragraphs, NSString *text, NSArray *r
             if ([run[@"bold"] boolValue]) adjRun[@"bold"] = @YES;
             if ([run[@"italic"] boolValue]) adjRun[@"italic"] = @YES;
             if ([run[@"underline"] boolValue]) adjRun[@"underline"] = @YES;
+            if (run[@"color"]) adjRun[@"color"] = run[@"color"];
             [adjRuns addObject:adjRun];
         }
         if (adjRuns.count > 0) para[@"runs"] = adjRuns;
@@ -549,6 +575,8 @@ static NSArray *noteToParaModel(id note) {
                 }
                 id ttUnderline = attrs[@"TTUnderline"];
                 if (ttUnderline) run[@"underline"] = @YES;
+                NSString *colorHex = hexStringForColor(attrs[@"TTColor"] ?: attrs[NSForegroundColorAttributeName]);
+                if (colorHex) run[@"color"] = colorHex;
                 [currentRuns addObject:run];
                 [currentText appendString:sliceText];
                 runOffsetInPara += sliceLen;
@@ -745,6 +773,9 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs, BOOL blankLineSeparato
                     escaped = [NSString stringWithFormat:@"**%@**", escaped];
                 } else if (isItalic) {
                     escaped = [NSString stringWithFormat:@"*%@*", escaped];
+                }
+                if (run[@"color"]) {
+                    escaped = [NSString stringWithFormat:@"<span style=\"color:%@\">%@</span>", run[@"color"], escaped];
                 }
 
                 [fmt appendString:escaped];
@@ -1087,6 +1118,39 @@ static void parseInlineFormatting(NSString *lineText, NSMutableString *outPlainT
         // Check for <u>text</u> (underline)
         if ((c == '<') && i + 2 < len) {
             NSString *rest = [lineText substringFromIndex:i];
+            if ([rest hasPrefix:@"<span"]) {
+                NSRange openEnd = [lineText rangeOfString:@">" options:0 range:NSMakeRange(i, len - i)];
+                if (openEnd.location != NSNotFound) {
+                    NSString *openTag = [lineText substringWithRange:NSMakeRange(i, openEnd.location - i + 1)];
+                    NSString *colorHex = colorHexFromSpanTag(openTag);
+                    NSRange closeTag = [lineText rangeOfString:@"</span>" options:NSCaseInsensitiveSearch
+                        range:NSMakeRange(openEnd.location + 1, len - openEnd.location - 1)];
+                    if (colorHex && closeTag.location != NSNotFound) {
+                        NSString *inner = [lineText substringWithRange:NSMakeRange(openEnd.location + 1, closeTag.location - openEnd.location - 1)];
+                        NSMutableString *innerPlain = [NSMutableString string];
+                        NSMutableArray *innerRuns = [NSMutableArray array];
+                        parseInlineFormatting(inner, innerPlain, innerRuns);
+
+                        NSUInteger baseOffset = outPlainText.length;
+                        [outPlainText appendString:innerPlain];
+
+                        for (NSMutableDictionary *innerRun in innerRuns) {
+                            innerRun[@"start"] = @([innerRun[@"start"] unsignedIntegerValue] + baseOffset);
+                            innerRun[@"color"] = colorHex;
+                            [outRuns addObject:innerRun];
+                        }
+                        if (innerRuns.count == 0 && innerPlain.length > 0) {
+                            [outRuns addObject:[@{
+                                @"start": @(baseOffset),
+                                @"length": @(innerPlain.length),
+                                @"color": colorHex
+                            } mutableCopy]];
+                        }
+                        i = closeTag.location + 7;
+                        continue;
+                    }
+                }
+            }
             if ([rest hasPrefix:@"<u>"]) {
                 NSRange closeTag = [lineText rangeOfString:@"</u>" options:0
                     range:NSMakeRange(i + 3, len - i - 3)];
@@ -1377,6 +1441,8 @@ static BOOL inlineRunsEqual(NSArray *a, NSArray *b) {
         if ([ra[@"bold"] boolValue] != [rb[@"bold"] boolValue]) return NO;
         if ([ra[@"italic"] boolValue] != [rb[@"italic"] boolValue]) return NO;
         if ([ra[@"underline"] boolValue] != [rb[@"underline"] boolValue]) return NO;
+        if (![ra[@"color"] isEqual:rb[@"color"]] &&
+            !(ra[@"color"] == nil && rb[@"color"] == nil)) return NO;
     }
     return YES;
 }
@@ -1504,6 +1570,12 @@ static NSInteger applyInlineRuns(id ms, id note, id viewContext, NSDictionary *n
             }
         }
         if ([run[@"strikethrough"] boolValue]) runAttrs[@"TTStrikethrough"] = @1;
+        if (run[@"color"]) {
+            NSColor *colorValue = nil;
+            if (parseHexColor(run[@"color"], nil, &colorValue)) {
+                runAttrs[@"TTColor"] = (__bridge id)[colorValue CGColor];
+            }
+        }
         {
             NSUInteger hints = 0;
             if ([run[@"bold"] boolValue]) hints |= 1;
@@ -1511,10 +1583,87 @@ static NSInteger applyInlineRuns(id ms, id note, id viewContext, NSDictionary *n
             if (hints > 0) runAttrs[@"TTHints"] = @(hints);
         }
         if ([run[@"underline"] boolValue]) runAttrs[@"TTUnderline"] = @1;
-        ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
-            runAttrs, NSMakeRange(pos + runStart, runLen));
+        NSRange runRange = NSMakeRange(pos + runStart, runLen);
+        if (run[@"color"]) {
+            setMergeableAttributesPreservingText(ms, runAttrs, runRange);
+        } else {
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
+                runAttrs, runRange);
+        }
     }
     return runDelta;
+}
+
+static BOOL modelHasColorRuns(NSArray *model) {
+    for (NSDictionary *para in model) {
+        for (NSDictionary *run in para[@"runs"]) {
+            if (run[@"color"]) return YES;
+        }
+    }
+    return NO;
+}
+
+static void applyColorRunsFromModel(id note, id viewContext, NSArray *model) {
+    if (!modelHasColorRuns(model)) return;
+
+    id doc = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("document"));
+    id ms = ((id (*)(id, SEL))objc_msgSend)(doc, sel_registerName("mergeableString"));
+    NSUInteger msLen = ((NSUInteger (*)(id, SEL))objc_msgSend)(ms, sel_registerName("length"));
+    id msAS = ((id (*)(id, SEL))objc_msgSend)(ms, sel_registerName("string"));
+    NSString *msStr = (msAS && [msAS respondsToSelector:@selector(string)]) ? [msAS string] : (NSString *)msAS;
+    if (!msStr) return;
+
+    ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("beginEditing"));
+
+    NSUInteger searchStart = 0;
+    for (NSUInteger i = 0; i < model.count; i++) {
+        NSDictionary *para = model[i];
+        NSString *text = storageTextForPara(para[@"text"] ?: @"");
+        NSUInteger boundedSearchStart = MIN(searchStart, msStr.length);
+        NSRange paraSearchRange = NSMakeRange(boundedSearchStart, msStr.length - boundedSearchStart);
+        NSRange paraRange = [msStr rangeOfString:text options:0 range:paraSearchRange];
+        if (paraRange.location == NSNotFound) {
+            searchStart = MIN(msStr.length, searchStart + text.length + 1);
+            continue;
+        }
+        for (NSDictionary *run in para[@"runs"]) {
+            NSString *colorHex = run[@"color"];
+            if (!colorHex) continue;
+
+            NSColor *colorValue = nil;
+            if (!parseHexColor(colorHex, nil, &colorValue)) continue;
+
+            NSUInteger runStart = paraRange.location + [run[@"start"] unsignedIntegerValue];
+            NSUInteger runLen = [run[@"length"] unsignedIntegerValue];
+            if (runLen == 0 || runStart >= msLen || runStart + runLen > msLen) continue;
+
+            NSUInteger idx = runStart;
+            NSUInteger end = runStart + runLen;
+            while (idx < end) {
+                NSRange effectiveRange;
+                NSDictionary *existingAttrs = ((id (*)(id, SEL, NSUInteger, NSRange*))objc_msgSend)(
+                    ms, sel_registerName("attributesAtIndex:effectiveRange:"), idx, &effectiveRange);
+                NSUInteger segStart = MAX(effectiveRange.location, runStart);
+                NSUInteger segEnd = MIN(effectiveRange.location + effectiveRange.length, end);
+                if (segEnd <= segStart) break;
+
+                NSMutableDictionary *patchedAttrs = [existingAttrs mutableCopy];
+                if (!patchedAttrs) patchedAttrs = [NSMutableDictionary dictionary];
+                patchedAttrs[@"TTColor"] = (__bridge id)[colorValue CGColor];
+                setMergeableAttributesPreservingText(ms, patchedAttrs, NSMakeRange(segStart, segEnd - segStart));
+                idx = segEnd;
+            }
+        }
+        searchStart = paraRange.location + paraRange.length;
+    }
+
+    ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+        note, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, msLen), 0);
+    ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("endEditing"));
+    ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("saveNoteData"));
+    NSError *error = nil;
+    [viewContext save:&error];
+    if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 }
 
 // Full-replace write: clear note content and rewrite from scratch.
@@ -1681,6 +1830,7 @@ static int cmdWriteMarkdownFullReplace(id note, id viewContext, NSString *identi
     if (error) {
         errorExit([NSString stringWithFormat:@"Save error: %@", error]);
     }
+    applyColorRunsFromModel(note, viewContext, newModel);
 
     // Print summary with readback
     NSMutableDictionary *summary = [NSMutableDictionary dictionary];
@@ -1973,6 +2123,8 @@ static int cmdWriteMarkdownDiff(id note, id viewContext, NSString *identifier,
                 [patchedAttrs removeObjectForKey:@"TTStrikethrough"];
                 [patchedAttrs removeObjectForKey:@"TTHints"];
                 [patchedAttrs removeObjectForKey:@"TTUnderline"];
+                [patchedAttrs removeObjectForKey:@"TTColor"];
+                [patchedAttrs removeObjectForKey:NSForegroundColorAttributeName];
 
                 ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
                     patchedAttrs, NSMakeRange(pos, paraLen));
@@ -2037,6 +2189,7 @@ static int cmdWriteMarkdownDiff(id note, id viewContext, NSString *identifier,
     if (error) {
         errorExit([NSString stringWithFormat:@"Save error: %@", error]);
     }
+    applyColorRunsFromModel(note, viewContext, newModel);
 
     summary[@"content"] = noteToMarkdownString(note);
     printJSON(summary);
@@ -2467,8 +2620,8 @@ static void usage(void) {
     fprintf(stderr, "\n");
     fprintf(stderr, "Use read-markdown/write-markdown for all note operations. With --diff,\n");
     fprintf(stderr, "write-markdown does paragraph-level LCS diffing — it only mutates paragraphs\n");
-    fprintf(stderr, "that changed. Markdown supports headings, bold, italic, strikethrough, links,\n");
-    fprintf(stderr, "code, lists, checklists, and note-to-note links. Primitives exist for edge\n");
+    fprintf(stderr, "that changed. Markdown supports headings, bold, italic, strikethrough, color,\n");
+    fprintf(stderr, "links, code, lists, checklists, and note-to-note links. Primitives exist for edge\n");
     fprintf(stderr, "cases not covered by markdown syntax.\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Note-to-note links:\n");
@@ -2521,7 +2674,7 @@ static void usage(void) {
     fprintf(stderr, "  notekit append --id <id> --text <text> [--style <n>]\n");
     fprintf(stderr, "  notekit insert --id <id> --text <text> --position <n> [--style <n>] [--body-offset]\n");
     fprintf(stderr, "  notekit delete-range --id <id> --start <n> --length <n> [--body-offset]\n");
-    fprintf(stderr, "  notekit set-attr --id <id> --offset <n> --length <n> [--style <n>] [--indent <n>] [--todo-done true|false] [--link <url>] [--strikethrough true|false] [--body-offset]\n");
+    fprintf(stderr, "  notekit set-attr --id <id> --offset <n> --length <n> [--style <n>] [--indent <n>] [--todo-done true|false] [--link <url>] [--strikethrough true|false] [--color <hex|reset>] [--body-offset]\n");
     fprintf(stderr, "  notekit search-offset --id <id> --text <text> [--case-insensitive]\n");
     fprintf(stderr, "  notekit replace --id <id> --search <text> --replacement <text>\n");
     fprintf(stderr, "  notekit delete-line --id <id> --search-text <search-text>\n");

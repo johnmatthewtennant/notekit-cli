@@ -130,6 +130,74 @@ static BOOL isValidStyle(NSInteger style) {
     return style == 0 || style == 1 || style == 2 || style == 3 || style == 4 || style == 100 || style == 101 || style == 102 || style == 103;
 }
 
+static NSString *hexStringForColor(id color) {
+    if (!color) return nil;
+    @try {
+        if (CFGetTypeID((__bridge CFTypeRef)color) == CGColorGetTypeID()) {
+            CGColorRef cgColor = (__bridge CGColorRef)color;
+            NSColor *nsColor = [NSColor colorWithCGColor:cgColor];
+            if (!nsColor) return nil;
+            color = nsColor;
+        }
+        if (![color respondsToSelector:@selector(colorUsingColorSpace:)]) return nil;
+        NSColor *rgb = [color colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+        if (!rgb) return nil;
+        CGFloat r = 0, g = 0, b = 0, a = 0;
+        [rgb getRed:&r green:&g blue:&b alpha:&a];
+        return [NSString stringWithFormat:@"#%02x%02x%02x",
+            (unsigned int)lrint(MAX(0.0, MIN(1.0, r)) * 255.0),
+            (unsigned int)lrint(MAX(0.0, MIN(1.0, g)) * 255.0),
+            (unsigned int)lrint(MAX(0.0, MIN(1.0, b)) * 255.0)];
+    } @catch (NSException *e) {
+        return nil;
+    }
+}
+
+static BOOL parseHexColor(NSString *input, NSString **normalizedHex, NSColor **outColor) {
+    if (!input) return NO;
+    NSString *trimmed = [input stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([trimmed hasPrefix:@"#"]) trimmed = [trimmed substringFromIndex:1];
+    if (trimmed.length != 3 && trimmed.length != 6) return NO;
+
+    NSCharacterSet *hexSet = [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdefABCDEF"];
+    if ([trimmed rangeOfCharacterFromSet:[hexSet invertedSet]].location != NSNotFound) return NO;
+
+    if (trimmed.length == 3) {
+        unichar r = [trimmed characterAtIndex:0];
+        unichar g = [trimmed characterAtIndex:1];
+        unichar b = [trimmed characterAtIndex:2];
+        trimmed = [NSString stringWithFormat:@"%C%C%C%C%C%C", r, r, g, g, b, b];
+    }
+    NSString *lower = [trimmed lowercaseString];
+
+    unsigned int rgb = 0;
+    NSScanner *scanner = [NSScanner scannerWithString:lower];
+    if (![scanner scanHexInt:&rgb] || ![scanner isAtEnd]) return NO;
+
+    CGFloat r = ((rgb >> 16) & 0xff) / 255.0;
+    CGFloat g = ((rgb >> 8) & 0xff) / 255.0;
+    CGFloat b = (rgb & 0xff) / 255.0;
+    if (normalizedHex) *normalizedHex = [@"#" stringByAppendingString:lower];
+    if (outColor) *outColor = [NSColor colorWithSRGBRed:r green:g blue:b alpha:1.0];
+    return YES;
+}
+
+static void setMergeableAttributesPreservingText(id ms, NSDictionary *attrs, NSRange range) {
+    if (range.length == 0) return;
+    id msAS = ((id (*)(id, SEL))objc_msgSend)(ms, sel_registerName("string"));
+    NSString *msStr = (msAS && [msAS respondsToSelector:@selector(string)]) ? [msAS string] : (NSString *)msAS;
+    if (msStr && range.location + range.length <= msStr.length) {
+        NSString *text = [msStr substringWithRange:range];
+        NSAttributedString *replacement = [[NSAttributedString alloc] initWithString:text attributes:attrs];
+        if ([ms respondsToSelector:sel_registerName("replaceCharactersInRange:withAttributedString:")]) {
+            ((void (*)(id, SEL, NSRange, id))objc_msgSend)(ms,
+                sel_registerName("replaceCharactersInRange:withAttributedString:"), range, replacement);
+            return;
+        }
+    }
+    ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"), attrs, range);
+}
+
 static id makeParagraphStyle(NSInteger style) {
     id paraStyle = [[ICTTParagraphStyleClass alloc] init];
     ((void (*)(id, SEL, NSUInteger))objc_msgSend)(paraStyle, sel_registerName("setStyle:"), (NSUInteger)style);
@@ -492,6 +560,9 @@ static int cmdReadAttrsNote(id note) {
         id ttUnderline = attrs[@"TTUnderline"];
         if (ttUnderline) entry[@"underline"] = @YES;
 
+        NSString *colorHex = hexStringForColor(attrs[@"TTColor"] ?: attrs[NSForegroundColorAttributeName]);
+        if (colorHex) entry[@"color"] = colorHex;
+
         id attachment = attrs[@"NSAttachment"];
         if (attachment) entry[@"hasAttachment"] = @YES;
 
@@ -693,12 +764,21 @@ static int cmdSetAttr(id viewContext, NSString *identifier,
     BOOL hasStyleOpts = (attrOpts[@"style"] || attrOpts[@"indent"] || attrOpts[@"todo-done"]);
     BOOL hasLinkOpt = (attrOpts[@"link"] != nil);
     BOOL hasStrikethroughOpt = (attrOpts[@"strikethrough"] != nil);
+    BOOL hasColorOpt = (attrOpts[@"color"] != nil);
 
     // Validate --strikethrough upfront if provided
     if (hasStrikethroughOpt) {
         NSString *val = attrOpts[@"strikethrough"];
         if (![val isEqualToString:@"true"] && ![val isEqualToString:@"false"]) {
             errorExit(@"--strikethrough must be 'true' or 'false'");
+        }
+    }
+
+    NSColor *colorValue = nil;
+    if (hasColorOpt) {
+        NSString *val = attrOpts[@"color"];
+        if (![val isEqualToString:@"reset"] && !parseHexColor(val, nil, &colorValue)) {
+            errorExit(@"--color must be a hex color (#rgb or #rrggbb) or 'reset'");
         }
     }
 
@@ -849,9 +929,23 @@ static int cmdSetAttr(id viewContext, NSString *identifier,
                 }
             }
 
-            // Write back patched attrs for this segment (never crosses a '\n')
-            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
-                patchedAttrs, segRange);
+            // Apply color delta if requested
+            if (hasColorOpt) {
+                if ([attrOpts[@"color"] isEqualToString:@"reset"]) {
+                    [patchedAttrs removeObjectForKey:@"TTColor"];
+                    [patchedAttrs removeObjectForKey:NSForegroundColorAttributeName];
+                } else {
+                    patchedAttrs[@"TTColor"] = (__bridge id)[colorValue CGColor];
+                }
+            }
+
+            // Write back patched attrs for this segment (never crosses a '\n').
+            if (hasColorOpt && ![attrOpts[@"color"] isEqualToString:@"reset"]) {
+                setMergeableAttributesPreservingText(ms, patchedAttrs, segRange);
+            } else {
+                ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
+                    patchedAttrs, segRange);
+            }
 
             segStart = segEnd;
         }
@@ -1118,6 +1212,7 @@ static int cmdReadStructuredNote(id note) {
     NSMutableArray *paragraphs = [NSMutableArray array];
     NSMutableString *currentLine = [NSMutableString string];
     NSMutableArray *currentLinks = [NSMutableArray array];
+    NSMutableArray *currentColors = [NSMutableArray array];
     NSString *currentUUID = nil;
     NSInteger currentStyle = -1;
     BOOL currentTodoDone = NO;
@@ -1150,11 +1245,13 @@ static int cmdReadStructuredNote(id note) {
                     if (currentStyle == 102) para[@"type"] = @"numbered";
                     if (currentStyle == 103) { para[@"type"] = @"checklist"; para[@"checked"] = @(currentTodoDone); }
                     if (currentLinks.count > 0) para[@"links"] = [currentLinks copy];
+                    if (currentColors.count > 0) para[@"colors"] = [currentColors copy];
                     [paragraphs addObject:para];
                 }
             }
             currentLine = [NSMutableString stringWithString:chunk];
             currentLinks = [NSMutableArray array];
+            currentColors = [NSMutableArray array];
             currentUUID = uuid;
             currentStyle = styleNum;
             currentTodoDone = done;
@@ -1188,6 +1285,14 @@ static int cmdReadStructuredNote(id note) {
             [currentLinks addObject:linkEntry];
         }
 
+        NSString *colorHex = hexStringForColor(attrs[@"TTColor"] ?: attrs[NSForegroundColorAttributeName]);
+        if (colorHex) {
+            NSMutableDictionary *colorEntry = [NSMutableDictionary dictionary];
+            colorEntry[@"text"] = chunk;
+            colorEntry[@"color"] = colorHex;
+            [currentColors addObject:colorEntry];
+        }
+
         idx = effectiveRange.location + effectiveRange.length;
     }
     if (currentLine.length > 0) {
@@ -1201,6 +1306,7 @@ static int cmdReadStructuredNote(id note) {
             if (currentStyle == 102) para[@"type"] = @"numbered";
             if (currentStyle == 103) { para[@"type"] = @"checklist"; para[@"checked"] = @(currentTodoDone); }
             if (currentLinks.count > 0) para[@"links"] = [currentLinks copy];
+            if (currentColors.count > 0) para[@"colors"] = [currentColors copy];
             [paragraphs addObject:para];
         }
     }

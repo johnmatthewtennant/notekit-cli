@@ -892,17 +892,54 @@ static int cmdMoveNote(id viewContext, NSString *identifier, NSString *toFolder)
     return 0;
 }
 
-static int cmdSearch(id viewContext, NSString *query, NSString *folderName) {
+static NSDate *dateFromYYYYMMDD(NSString *dateString, BOOL endOfDay) {
+    if (!dateString || dateString.length == 0) return nil;
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    formatter.dateFormat = @"yyyy-MM-dd";
+    NSDate *date = [formatter dateFromString:dateString];
+    if (!date) errorExit([NSString stringWithFormat:@"Invalid date: %@. Expected YYYY-MM-DD.", dateString]);
+    if (!endOfDay) return date;
+    return [date dateByAddingTimeInterval:86399.999];
+}
+
+static BOOL noteMatchesSearchBody(id note, NSString *query) {
+    NSString *title = nil;
+    NSString *snippet = nil;
+    NSString *body = nil;
+    @try { title = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("title")); } @catch (NSException *e) {}
+    @try { snippet = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("snippet")); } @catch (NSException *e) {}
+    @try { body = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("noteAsPlainTextWithoutTitle")); } @catch (NSException *e) {}
+
+    NSRange titleRange = [title ?: @"" rangeOfString:query options:NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch];
+    if (titleRange.location != NSNotFound) return YES;
+    NSRange snippetRange = [snippet ?: @"" rangeOfString:query options:NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch];
+    if (snippetRange.location != NSNotFound) return YES;
+    NSRange bodyRange = [body ?: @"" rangeOfString:query options:NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch];
+    return bodyRange.location != NSNotFound;
+}
+
+static int cmdSearch(id viewContext, NSString *query, NSString *folderName, NSString *modifiedFrom, NSString *modifiedTo, NSUInteger limit, BOOL includeBody) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
     NSMutableArray *predicates = [NSMutableArray array];
     [predicates addObject:activeNotePredicate()];
-    [predicates addObject:[NSPredicate predicateWithFormat:@"title CONTAINS[cd] %@ OR snippet CONTAINS[cd] %@", query, query]];
+    if (!includeBody) {
+        [predicates addObject:[NSPredicate predicateWithFormat:@"title CONTAINS[cd] %@ OR snippet CONTAINS[cd] %@", query, query]];
+    }
     if (folderName) {
         [predicates addObject:[NSPredicate predicateWithFormat:@"folder.title == %@", folderName]];
     }
+    NSDate *fromDate = dateFromYYYYMMDD(modifiedFrom, NO);
+    NSDate *toDate = dateFromYYYYMMDD(modifiedTo, YES);
+    if (fromDate) {
+        [predicates addObject:[NSPredicate predicateWithFormat:@"modificationDate >= %@", fromDate]];
+    }
+    if (toDate) {
+        [predicates addObject:[NSPredicate predicateWithFormat:@"modificationDate <= %@", toDate]];
+    }
     request.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:predicates];
     request.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"modificationDate" ascending:NO]];
-    request.fetchLimit = 20;
+    if (!includeBody && limit > 0) request.fetchLimit = limit;
     NSError *error = nil;
     NSArray *notes = [viewContext executeFetchRequest:request error:&error];
     if (error) {
@@ -911,7 +948,13 @@ static int cmdSearch(id viewContext, NSString *query, NSString *folderName) {
     }
     NSMutableArray *result = [NSMutableArray array];
     for (id note in notes) {
+        if (includeBody && !noteMatchesSearchBody(note, query)) {
+            continue;
+        }
         [result addObject:noteToDict(note)];
+        if (includeBody && limit > 0 && result.count >= limit) {
+            break;
+        }
     }
     printJSON(result);
     return 0;

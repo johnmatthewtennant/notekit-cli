@@ -35,7 +35,9 @@ Primitives:
   notekit move --id <id> --to <to-folder>
   notekit create-folder --name <name>
   notekit delete-folder --name <name>
-  notekit search --query <query> [--folder <name>]
+  notekit search --query <query> [--folder <name>] [--limit <n>]
+                 [--modified-from YYYY-MM-DD] [--modified-to YYYY-MM-DD]
+                 [--include-body]
   notekit pin --id <id>
   notekit unpin --id <id>
   notekit get-link --id <id>

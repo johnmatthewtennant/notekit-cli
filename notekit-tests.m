@@ -4138,6 +4138,46 @@ static int cmdTest(id viewContext) {
             [viewContext save:nil];
         }
 
+        // --- Test: Color markdown round-trip ---
+        fprintf(stderr, "Test: Color markdown round-trip...\n");
+        {
+            NSString *colorTitle = @"__color_roundtrip_test__";
+            id colorNote = ((id (*)(id, SEL, id))objc_msgSend)(ICNoteClass, sel_registerName("newEmptyNoteInFolder:"), testFolder);
+            ((void (*)(id, SEL))objc_msgSend)(colorNote, sel_registerName("beginEditing"));
+            id colorDoc = ((id (*)(id, SEL))objc_msgSend)(colorNote, sel_registerName("document"));
+            id colorMs = ((id (*)(id, SEL))objc_msgSend)(colorDoc, sel_registerName("mergeableString"));
+            ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(colorMs, sel_registerName("insertString:atIndex:"), colorTitle, 0);
+            id colorTitleStyle = [[ICTTParagraphStyleClass alloc] init];
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(colorTitleStyle, sel_registerName("setStyle:"), 0);
+            ((void (*)(id, SEL, id, NSRange))objc_msgSend)(colorMs, sel_registerName("setAttributes:range:"),
+                @{@"TTStyle": colorTitleStyle}, NSMakeRange(0, colorTitle.length));
+            ((void (*)(id, SEL, NSUInteger, NSRange, NSInteger))objc_msgSend)(
+                colorNote, sel_registerName("edited:range:changeInLength:"), 1, NSMakeRange(0, colorTitle.length), colorTitle.length);
+            ((void (*)(id, SEL))objc_msgSend)(colorNote, sel_registerName("endEditing"));
+            ((void (*)(id, SEL))objc_msgSend)(colorNote, sel_registerName("saveNoteData"));
+            [viewContext save:nil];
+
+            NSString *expectedColorMd = [NSString stringWithFormat:@"# %@\nplain <span style=\"color:#a371f7\">purple</span> text", colorTitle];
+            cmdWriteMarkdownWithString(colorNote, viewContext, expectedColorMd, NO, NO, NO);
+            [viewContext save:nil];
+
+            NSString *firstRead = noteToMarkdownString(colorNote);
+            cmdWriteMarkdownWithString(colorNote, viewContext, firstRead, NO, NO, YES);
+            [viewContext save:nil];
+
+            NSString *secondRead = noteToMarkdownString(colorNote);
+            BOOL colorPass = [secondRead containsString:@"plain <span style=\"color:#a371f7\">purple</span> text"] &&
+                              [secondRead isEqualToString:firstRead];
+            if (colorPass) { fprintf(stderr, "  PASS\n"); passed++; }
+            else {
+                fprintf(stderr, "  FAIL (first: %s second: %s)\n", [firstRead UTF8String], [secondRead UTF8String]);
+                failed++;
+            }
+
+            deleteNote(colorNote, viewContext);
+            [viewContext save:nil];
+        }
+
         // --- Test: Raw attribute round-trip ---
         fprintf(stderr, "Test: Raw attribute round-trip...\n");
         {

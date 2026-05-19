@@ -465,7 +465,7 @@ static int cmdTest(id viewContext) {
 
     // Test 13: cmdSearch (call actual command)
     fprintf(stderr, "Test 13: cmdSearch...\n");
-    { int r = cmdSearch(viewContext, testTitle, testFolderName, nil, nil, 20, NO); if (r==0) { fprintf(stderr, "  PASS\n"); passed++; } else { fprintf(stderr, "  FAIL\n"); failed++; } }
+    { int r = cmdSearch(viewContext, testTitle, testFolderName); if (r==0) { fprintf(stderr, "  PASS\n"); passed++; } else { fprintf(stderr, "  FAIL\n"); failed++; } }
 
     // Test 14: Verify JSON shape from noteToDict (all fields + types)
     fprintf(stderr, "Test 14: JSON shape (all noteToDict fields)...\n");
@@ -850,27 +850,6 @@ static int cmdTest(id viewContext) {
         NSString *err = validateNoteDictArray(parsed);
         if (!err) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (%s)\n", [err UTF8String]); failed++; }
-    }
-
-    // Test: cmdSearch include-body and modified-date filters
-    fprintf(stderr, "Test: cmdSearch include-body modified date filters...\n");
-    {
-        NSString *args = [NSString stringWithFormat:@"search --query 'Checklist item' --folder '%@' --include-body --modified-from '2000-01-01' --modified-to '2999-12-31' --limit 5", testFolderName];
-        id parsed = runCommandAndParseJSON(exePath, args);
-        NSString *err = validateNoteDictArray(parsed);
-        BOOL found = NO;
-        if (!err) {
-            for (NSDictionary *entry in parsed) {
-                NSString *body = entry[@"body"];
-                if ([body isKindOfClass:[NSString class]] && [body containsString:@"Checklist item"]) {
-                    found = YES;
-                    break;
-                }
-            }
-        }
-        if (!err && found) { fprintf(stderr, "  PASS\n"); passed++; }
-        else if (err) { fprintf(stderr, "  FAIL (%s)\n", [err UTF8String]); failed++; }
-        else { fprintf(stderr, "  FAIL (body match not found)\n"); failed++; }
     }
 
     // Test: cmdReadStructured JSON shape (subprocess, predicate-based)
@@ -4665,3 +4644,4 @@ static int cmdTest(id viewContext) {
     fprintf(stderr, "\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
 }
+

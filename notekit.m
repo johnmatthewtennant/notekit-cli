@@ -45,7 +45,6 @@ int main(int argc, const char *argv[]) {
                     [flag isEqualToString:@"backup"] ||
                     [flag isEqualToString:@"diff"] ||
                     [flag isEqualToString:@"case-insensitive"] ||
-                    [flag isEqualToString:@"include-body"] ||
                     [flag isEqualToString:@"preserve-round-trip"]) {
                     opts[flag] = @"true";
                 } else if (i + 1 < argc) {
@@ -199,9 +198,7 @@ int main(int argc, const char *argv[]) {
 
         } else if ([command isEqualToString:@"search"]) {
             if (!kwQuery) { fprintf(stderr, "Error: --query required\n"); usage(); return 1; }
-            NSUInteger limit = opts[@"limit"] ? [opts[@"limit"] integerValue] : 20;
-            BOOL includeBody = [opts[@"include-body"] isEqualToString:@"true"];
-            return cmdSearch(viewContext, kwQuery, folderName, opts[@"modified-from"], opts[@"modified-to"], limit, includeBody);
+            return cmdSearch(viewContext, kwQuery, folderName);
 
         } else if ([command isEqualToString:@"pin"]) {
             NSString *noteID = opts[@"id"];

@@ -2486,9 +2486,7 @@ static void usage(void) {
     fprintf(stderr, "  notekit folders\n");
     fprintf(stderr, "  notekit list [--folder <name>] [--limit <n>]\n");
     fprintf(stderr, "  notekit get (--title <title> | --id <id>) [--folder <name>]\n");
-    fprintf(stderr, "  notekit search --query <query> [--folder <name>] [--limit <n>]\n");
-    fprintf(stderr, "                 [--modified-from YYYY-MM-DD] [--modified-to YYYY-MM-DD]\n");
-    fprintf(stderr, "                 [--include-body]             Include markdown body text in matching\n");
+    fprintf(stderr, "  notekit search --query <query> [--folder <name>]\n");
     fprintf(stderr, "  notekit delete --id <id>\n");
     fprintf(stderr, "  notekit move --id <id> --to <to-folder>\n");
     fprintf(stderr, "  notekit pin --id <id>\n");

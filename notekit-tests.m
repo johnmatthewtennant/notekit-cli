@@ -3309,6 +3309,49 @@ static int cmdTest(id viewContext) {
         else { fprintf(stderr, "  FAIL\n"); failed++; }
     }
 
+    // Test: consecutive style-4 paragraphs merge into a single fenced block.
+    // Apple Notes stores each line of a hand-typed code block as its own
+    // paragraph (real \n breaks, not  ). The serializer must coalesce
+    // adjacent style-4 paragraphs into one fence rather than emit a fence per
+    // line — and size the fence above any literal backtick run in the content.
+    fprintf(stderr, "Test: consecutive code paragraphs merge into one fence...\n");
+    {
+        BOOL ok = YES;
+        NSArray *handTyped = @[
+            @{@"style": @0, @"text": @"Title"},
+            @{@"style": @4, @"text": @"Please install:"},
+            @{@"style": @4, @"text": @"```"},
+            @{@"style": @4, @"text": @"brew install foo"},
+            @{@"style": @3, @"text": @"After the block"},
+        ];
+        NSString *out = paraModelToMarkdown(handTyped, NO);
+
+        // The three style-4 paragraphs become one block, fenced with four
+        // backticks because the content contains a literal ``` line.
+        NSString *expectedBlock = @"````\nPlease install:\n```\nbrew install foo\n````";
+        if ([out rangeOfString:expectedBlock].location == NSNotFound) {
+            ok = NO;
+            fprintf(stderr, "    FAIL: merged block not found in output:\n    got: '%s'\n", [out UTF8String]);
+        }
+
+        // Exactly one fence pair: the four-backtick fence appears exactly twice.
+        NSUInteger fences = 0;
+        NSRange search = NSMakeRange(0, out.length);
+        while (search.location < out.length) {
+            NSRange r = [out rangeOfString:@"````" options:0 range:search];
+            if (r.location == NSNotFound) break;
+            fences++;
+            search = NSMakeRange(r.location + r.length, out.length - (r.location + r.length));
+        }
+        if (fences != 2) {
+            ok = NO;
+            fprintf(stderr, "    FAIL: expected exactly 2 four-backtick fences, got %lu\n", (unsigned long)fences);
+        }
+
+        if (ok) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL\n"); failed++; }
+    }
+
     // Test: write-markdown code block (end-to-end)
     fprintf(stderr, "Test: write-markdown code block...\n");
     {

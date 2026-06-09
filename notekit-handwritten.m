@@ -675,8 +675,21 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs, BOOL blankLineSeparato
 
         // Handle code block paragraphs (style 4) — no markdown escaping
         if (style == 4) {
+            // Merge consecutive style-4 paragraphs into a single fenced block.
+            // Apple Notes stores each line of a code block as its own paragraph;
+            // emitting a fence per line would shatter the block (and any literal
+            // backtick lines) into many bogus fences. Join them with newlines and
+            // emit one fence sized to the combined content.
+            NSMutableString *merged = [NSMutableString stringWithString:rawText];
+            NSUInteger j = i + 1;
+            for (; j < paragraphs.count; j++) {
+                if ([paragraphs[j][@"style"] integerValue] != 4) break;
+                [merged appendString:@"\n"];
+                [merged appendString:(paragraphs[j][@"text"] ?: @"")];
+            }
+            i = j - 1;  // outer loop's i++ advances past the consumed paragraphs
             // Replace U+2028 line separators back to newlines
-            NSString *codeText = [rawText stringByReplacingOccurrencesOfString:@"\u2028" withString:@"\n"];
+            NSString *codeText = [merged stringByReplacingOccurrencesOfString:@"\u2028" withString:@"\n"];
             // Choose fence that won't conflict with code content
             // Count max run of backticks in code text to determine fence length
             NSUInteger maxBacktickRun = 0;

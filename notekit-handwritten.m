@@ -2281,6 +2281,23 @@ static int cmdCreateMarkdown(id viewContext, NSString *folderName, NSString *tit
 
 // --- Install Skill ---
 
+// Rewrite a path under Homebrew's versioned Cellar (<prefix>/Cellar/<formula>/<version>/...)
+// to the stable <prefix>/opt/<formula>/... form so installed symlinks survive upgrades.
+static NSString *stableSkillSourcePath(NSString *path) {
+    NSArray *parts = [path pathComponents];
+    NSUInteger idx = [parts indexOfObject:@"Cellar"];
+    if (idx == NSNotFound || idx + 3 > parts.count) return path;
+    NSMutableArray *out = [[parts subarrayWithRange:NSMakeRange(0, idx)] mutableCopy];
+    [out addObject:@"opt"];
+    [out addObject:parts[idx + 1]];
+    if (idx + 3 < parts.count) {
+        [out addObjectsFromArray:[parts subarrayWithRange:NSMakeRange(idx + 3, parts.count - idx - 3)]];
+    }
+    NSString *candidate = [NSString pathWithComponents:out];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:candidate]) return candidate;
+    return path;
+}
+
 static int cmdInstallSkill(BOOL installClaude, BOOL installAgents, BOOL force) {
     // Get path of currently running binary
     char execPath[PATH_MAX];
@@ -2300,34 +2317,38 @@ static int cmdInstallSkill(BOOL installClaude, BOOL installAgents, BOOL force) {
     NSString *binaryPath = [NSString stringWithUTF8String:realPath];
     NSString *binDir = [binaryPath stringByDeletingLastPathComponent];
 
-    // Try to find SKILL.md relative to the binary
+    // Try to find the skill directory relative to the binary
     // Homebrew: /opt/homebrew/Cellar/notekit-cli/X.Y.Z/bin/notekit
-    //   skill: /opt/homebrew/Cellar/notekit-cli/X.Y.Z/.agents/skills/apple-notes/SKILL.md
-    // Build dir: ./notekit  ->  ./.agents/skills/apple-notes/SKILL.md
+    //   skill: /opt/homebrew/Cellar/notekit-cli/X.Y.Z/.agents/skills/apple-notes
+    // Build dir: ./notekit  ->  ./.agents/skills/apple-notes
     NSArray *candidates = @[
-        [[binDir stringByDeletingLastPathComponent] stringByAppendingPathComponent:@".agents/skills/apple-notes/SKILL.md"],
-        [[binDir stringByAppendingPathComponent:@".."] stringByAppendingPathComponent:@".agents/skills/apple-notes/SKILL.md"],
-        [binDir stringByAppendingPathComponent:@".agents/skills/apple-notes/SKILL.md"],
+        [[binDir stringByDeletingLastPathComponent] stringByAppendingPathComponent:@".agents/skills/apple-notes"],
+        [[binDir stringByAppendingPathComponent:@".."] stringByAppendingPathComponent:@".agents/skills/apple-notes"],
+        [binDir stringByAppendingPathComponent:@".agents/skills/apple-notes"],
     ];
 
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *sourcePath = nil;
+    NSString *sourceDir = nil;
     for (NSString *candidate in candidates) {
         NSString *resolved = [candidate stringByStandardizingPath];
-        if ([fm fileExistsAtPath:resolved]) {
-            sourcePath = resolved;
+        if ([fm fileExistsAtPath:[resolved stringByAppendingPathComponent:@"SKILL.md"]]) {
+            sourceDir = resolved;
             break;
         }
     }
 
-    if (!sourcePath) {
-        fprintf(stderr, "Error: could not find SKILL.md relative to binary at %s\n", realPath);
+    if (!sourceDir) {
+        fprintf(stderr, "Error: could not find skill directory relative to binary at %s\n", realPath);
         fprintf(stderr, "Searched:\n");
         for (NSString *candidate in candidates) {
             fprintf(stderr, "  %s\n", [[candidate stringByStandardizingPath] UTF8String]);
         }
         return 1;
     }
+
+    // Symlink the whole skill directory, not its SKILL.md: Codex skips skills
+    // whose SKILL.md is a file symlink, but follows directory symlinks.
+    sourceDir = stableSkillSourcePath(sourceDir);
 
     // Install to selected skill directories
     NSString *home = NSHomeDirectory();
@@ -2338,33 +2359,33 @@ static int cmdInstallSkill(BOOL installClaude, BOOL installAgents, BOOL force) {
     NSError *error = nil;
     int failures = 0;
     for (NSString *dir in targetDirs) {
-        NSString *path = [dir stringByAppendingPathComponent:@"SKILL.md"];
         // Use attributesOfItemAtPath (not fileExistsAtPath) to detect broken symlinks
-        NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+        NSDictionary *attrs = [fm attributesOfItemAtPath:dir error:nil];
         if (attrs) {
             if (!force && [attrs[NSFileType] isEqualToString:NSFileTypeSymbolicLink]) {
-                NSString *dest = [fm destinationOfSymbolicLinkAtPath:path error:nil];
-                if ([dest isEqualToString:sourcePath]) {
-                    printf("Skill already installed: %s -> %s\n", [path UTF8String], [sourcePath UTF8String]);
+                NSString *dest = [fm destinationOfSymbolicLinkAtPath:dir error:nil];
+                if ([dest isEqualToString:sourceDir]) {
+                    printf("Skill already installed: %s -> %s\n", [dir UTF8String], [sourceDir UTF8String]);
                     continue;
                 }
             }
-            printf("Replacing existing %s\n", [path UTF8String]);
-            [fm removeItemAtPath:path error:nil];
+            printf("Replacing existing %s\n", [dir UTF8String]);
+            [fm removeItemAtPath:dir error:nil];
         }
-        if (![fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&error]) {
+        NSString *parent = [dir stringByDeletingLastPathComponent];
+        if (![fm createDirectoryAtPath:parent withIntermediateDirectories:YES attributes:nil error:&error]) {
             fprintf(stderr, "Error: could not create directory %s: %s\n",
-                [dir UTF8String], [[error localizedDescription] UTF8String]);
+                [parent UTF8String], [[error localizedDescription] UTF8String]);
             failures++;
             continue;
         }
-        if (![fm createSymbolicLinkAtPath:path withDestinationPath:sourcePath error:&error]) {
+        if (![fm createSymbolicLinkAtPath:dir withDestinationPath:sourceDir error:&error]) {
             fprintf(stderr, "Error: could not create symlink: %s\n",
                 [[error localizedDescription] UTF8String]);
             failures++;
             continue;
         }
-        printf("Installed skill: %s -> %s\n", [path UTF8String], [sourcePath UTF8String]);
+        printf("Installed skill: %s -> %s\n", [dir UTF8String], [sourceDir UTF8String]);
     }
 
     return failures > 0 ? 1 : 0;

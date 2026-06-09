@@ -9,6 +9,20 @@ brew install johnmatthewtennant/tap/notekit-cli
 notekit install-skill
 ```
 
+## Full Disk Access
+
+notekit needs Full Disk Access to read Apple Notes. To open the settings pane:
+
+```bash
+open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+```
+
+Then retry:
+
+```bash
+notekit folders
+```
+
 ## Claude Code
 
 ```

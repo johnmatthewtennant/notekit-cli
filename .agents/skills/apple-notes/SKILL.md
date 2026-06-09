@@ -1,3 +1,8 @@
+---
+name: apple-notes
+description: Read and edit Apple Notes on macOS via the notekit CLI. Use when creating, reading, editing, writing, searching, listing, organizing, moving, pinning, duplicating, exporting, or linking Apple Notes, notes folders, or note content.
+---
+
 # NoteKit CLI
 
 Command-line interface for Apple Notes. Built on the private NotesShared framework, which enables structured editing (headings, checklists, lists, styles at character offsets), folder management, search, and pinning — none of which are supported by AppleScript.

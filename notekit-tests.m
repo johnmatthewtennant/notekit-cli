@@ -69,6 +69,8 @@ static NSString *validateNoteDict(NSDictionary *dict) {
     // Optional keys (type-checked if present)
     id url = dict[@"url"];
     if (url && ![url isKindOfClass:[NSString class]]) return @"key 'url' has wrong type";
+    id folderPath = dict[@"folderPath"];
+    if (folderPath && ![folderPath isKindOfClass:[NSString class]]) return @"key 'folderPath' has wrong type";
     return nil;
 }
 
@@ -821,8 +823,8 @@ static int cmdTest(id viewContext) {
             NSUInteger badIdx = 0;
             for (NSUInteger i = 0; i < [parsed count]; i++) {
                 NSDictionary *entry = parsed[i];
-                if (![entry[@"name"] isKindOfClass:[NSString class]]) { allValid = NO; badIdx = i; break; }
-                if ([entry[@"name"] isEqualToString:testFolderName]) foundTestFolder = YES;
+                if (![entry[@"name"] isKindOfClass:[NSString class]] || ![entry[@"path"] isKindOfClass:[NSString class]]) { allValid = NO; badIdx = i; break; }
+                if ([entry[@"name"] isEqualToString:testFolderName] && [entry[@"path"] isEqualToString:testFolderName]) foundTestFolder = YES;
             }
             if (allValid && foundTestFolder) { fprintf(stderr, "  PASS (%lu folders)\n", (unsigned long)[parsed count]); passed++; }
             else if (!allValid) { fprintf(stderr, "  FAIL (element %lu missing 'name')\n", (unsigned long)badIdx); failed++; }
@@ -4650,6 +4652,73 @@ static int cmdTest(id viewContext) {
         if (errOk) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (expected exit=1 with 'Parent folder not found')\n"); failed++; }
     }
+    // Test: sync with configurable directory and Notes folder
+    fprintf(stderr, "Test: sync configurable directory and folder...\n");
+    {
+        NSString *syncFolder = @"__notes_cli_sync_test_folder__";
+        NSString *syncDir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"notekit-sync-test-%@", [[NSUUID UUID] UUIDString]]];
+        [[NSFileManager defaultManager] createDirectoryAtPath:syncDir withIntermediateDirectories:YES attributes:nil error:nil];
+        cmdCreateFolder(viewContext, syncFolder, nil);
+
+        NSString *localPath = [syncDir stringByAppendingPathComponent:@"Local Sync.md"];
+        [@"local body from file\n" writeToFile:localPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        int rc1 = cmdSync(viewContext, syncDir, syncFolder, nil, NO);
+        cmdSync(viewContext, syncDir, syncFolder, nil, NO);
+        id localNote = requireSingleNote(viewContext, @"Local Sync", syncFolder);
+        NSString *localID = noteToDict(localNote)[@"id"];
+        NSString *localMarkdown = noteToMarkdownString(localNote);
+
+        [@"# Local Sync\nlocal body updated\n" writeToFile:localPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        int rc2 = cmdSync(viewContext, syncDir, syncFolder, nil, NO);
+        localNote = findNoteByID(viewContext, localID);
+        NSString *updatedMarkdown = noteToMarkdownString(localNote);
+
+        id notesNote = syncCreateNote(viewContext, syncFolder, @"Notes Sync", @"notes body\n");
+        int rc3 = cmdSync(viewContext, syncDir, syncFolder, nil, NO);
+        NSString *notesPath = [syncDir stringByAppendingPathComponent:@"Notes Sync.md"];
+        NSString *notesFile = [NSString stringWithContentsOfFile:notesPath encoding:NSUTF8StringEncoding error:nil];
+
+        [@"# Local Sync\nlocal conflict body\n" writeToFile:localPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        cmdWriteMarkdownWithString(localNote, viewContext, @"# Local Sync\nnotes conflict body\n", NO, NO, NO);
+        int rc4 = cmdSync(viewContext, syncDir, syncFolder, nil, NO);
+        NSArray *dirItems = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:syncDir error:nil];
+        BOOL hasConflict = NO;
+        for (NSString *item in dirItems) {
+            if ([item containsString:@".local-conflict-"] && [item hasSuffix:@".md"]) { hasConflict = YES; break; }
+        }
+        NSString *conflictResolvedFile = [NSString stringWithContentsOfFile:localPath encoding:NSUTF8StringEncoding error:nil];
+
+        BOOL ok = (rc1 == 0 && rc2 == 0 && rc3 == 0 && rc4 == 2 &&
+                   [localMarkdown containsString:@"local body from file"] &&
+                   [updatedMarkdown containsString:@"local body updated"] &&
+                   [notesFile containsString:@"notes body"] &&
+                   [conflictResolvedFile containsString:@"notes conflict body"] && hasConflict && notesNote != nil);
+        if (ok) { fprintf(stderr, "  PASS\n"); passed++; }
+        else {
+            fprintf(stderr, "  FAIL (rc=%d/%d/%d/%d, note=%d, update=%d, file=%d, conflict=%d)\n",
+                rc1, rc2, rc3, rc4,
+                [localMarkdown containsString:@"local body from file"],
+                [updatedMarkdown containsString:@"local body updated"],
+                [notesFile containsString:@"notes body"], hasConflict);
+            failed++;
+        }
+
+        id n = findNote(viewContext, @"Local Sync", syncFolder);
+        if (n) deleteNote(n, viewContext);
+        n = findNote(viewContext, @"Notes Sync", syncFolder);
+        if (n) deleteNote(n, viewContext);
+        for (id f in fetchFolders(viewContext)) {
+            NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
+            if ([fname isEqualToString:syncFolder]) {
+                @try { ((void (*)(id, SEL))objc_msgSend)(f, sel_registerName("markForDeletion")); } @catch (id e) {}
+                [viewContext deleteObject:f];
+                [viewContext save:nil];
+                break;
+            }
+        }
+        [[NSFileManager defaultManager] removeItemAtPath:syncDir error:nil];
+    }
+
     // Test 19: Delete notes
     fprintf(stderr, "Test 19: Delete notes...\n");
     {

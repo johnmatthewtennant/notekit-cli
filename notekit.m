@@ -46,7 +46,9 @@ int main(int argc, const char *argv[]) {
                     [flag isEqualToString:@"backup"] ||
                     [flag isEqualToString:@"diff"] ||
                     [flag isEqualToString:@"case-insensitive"] ||
-                    [flag isEqualToString:@"preserve-round-trip"]) {
+                    [flag isEqualToString:@"preserve-round-trip"] ||
+                    [flag isEqualToString:@"metadata-json"] ||
+                    [flag isEqualToString:@"keep-conflict"]) {
                     opts[flag] = @"true";
                 } else if (i + 1 < argc) {
                     opts[flag] = [NSString stringWithUTF8String:argv[++i]];
@@ -70,7 +72,7 @@ int main(int argc, const char *argv[]) {
             @"create-empty", @"create", @"create-markdown", @"delete", @"append", @"insert",
             @"delete-range", @"search-offset", @"replace", @"delete-line",
             @"get-link", @"add-link", @"add-note-link",
-            @"export", @"install-skill", @"version", @"test", nil];
+            @"export", @"import", @"sync", @"sync-daemon", @"sync-resolve-conflict", @"install-skill", @"version", @"test", nil];
         if (![knownCommands containsObject:command]) {
             fprintf(stderr, "Unknown command: %s\n", [command UTF8String]);
             usage();
@@ -352,7 +354,22 @@ int main(int argc, const char *argv[]) {
                 }
                 metadataFields = requested;
             }
-            return cmdExport(viewContext, outputPath, folderName, opts[@"format"], preserveRoundTrip, metadataFields);
+            return cmdExport(viewContext, outputPath, folderName, opts[@"format"], preserveRoundTrip, metadataFields, [opts[@"metadata-json"] isEqualToString:@"true"]);
+
+        } else if ([command isEqualToString:@"import"]) {
+            NSString *inputPath = opts[@"input"];
+            if (!inputPath || inputPath.length == 0) { fprintf(stderr, "Error: --input required\n"); usage(); return 1; }
+            return cmdImport(viewContext, inputPath, folderName, [opts[@"metadata-json"] isEqualToString:@"true"]);
+
+        } else if ([command isEqualToString:@"sync"]) {
+            return cmdSync(viewContext, opts[@"dir"], folderName, opts[@"state"], [opts[@"dry-run"] isEqualToString:@"true"]);
+
+        } else if ([command isEqualToString:@"sync-daemon"]) {
+            NSTimeInterval interval = opts[@"interval"] ? [opts[@"interval"] doubleValue] : 5;
+            return cmdSyncDaemon(viewContext, opts[@"dir"], folderName, opts[@"state"], interval, [opts[@"dry-run"] isEqualToString:@"true"]);
+
+        } else if ([command isEqualToString:@"sync-resolve-conflict"]) {
+            return cmdSyncResolveConflict(viewContext, opts[@"file"], opts[@"dir"], folderName, opts[@"state"], [opts[@"keep-conflict"] isEqualToString:@"true"]);
 
         } else if ([command isEqualToString:@"test"]) {
             return cmdTest(viewContext);

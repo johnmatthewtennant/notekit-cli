@@ -1,12 +1,12 @@
 // Forward declaration: defined later in this file, used by write commands for readback
 static NSString *noteToMarkdownString(id note);
+static NSString *syncNoteBody(id note);
 
 static id createEmptyNoteInFolder(id viewContext, NSString *folderName) {
     id targetFolder = nil;
     NSArray *folders = fetchFolders(viewContext);
     for (id folder in folders) {
-        NSString *fname = ((id (*)(id, SEL))objc_msgSend)(folder, sel_registerName("title"));
-        if ([fname isEqualToString:folderName]) { targetFolder = folder; break; }
+        if (folderMatchesNameOrPath(folder, folderName)) { targetFolder = folder; break; }
     }
     if (!targetFolder) errorExit([NSString stringWithFormat:@"Folder not found: %@", folderName]);
 
@@ -81,8 +81,7 @@ static int cmdCreate(id viewContext, NSString *folderName, NSString *title, NSSt
     id targetFolder = nil;
     NSArray *folders = fetchFolders(viewContext);
     for (id folder in folders) {
-        NSString *fname = ((id (*)(id, SEL))objc_msgSend)(folder, sel_registerName("title"));
-        if ([fname isEqualToString:folderName]) { targetFolder = folder; break; }
+        if (folderMatchesNameOrPath(folder, folderName)) { targetFolder = folder; break; }
     }
     if (!targetFolder) errorExit([NSString stringWithFormat:@"Folder not found: %@", folderName]);
 
@@ -2450,9 +2449,61 @@ static NSString *yamlScalar(NSString *s) {
     return escaped;
 }
 
+
+static NSMutableDictionary *exportMetadataForNote(id note, NSString *title, NSString *folderPath, NSDate *createdDate, NSDate *modifiedDate, NSSet *metadataFields) {
+    NSMutableDictionary *meta = [NSMutableDictionary dictionary];
+    meta[@"title"] = title ?: @"Untitled";
+    if (folderPath.length > 0) meta[@"folder"] = folderPath;
+    if (createdDate) meta[@"created"] = dateToISO(createdDate);
+    if (modifiedDate) meta[@"modified"] = dateToISO(modifiedDate);
+    if ([metadataFields containsObject:@"id"]) {
+        @try { NSString *noteID = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("identifier")); if (noteID.length > 0) meta[@"id"] = noteID; } @catch (NSException *e) {}
+    }
+    if ([metadataFields containsObject:@"account"]) {
+        @try {
+            id folder = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("folder"));
+            id account = folder ? ((id (*)(id, SEL))objc_msgSend)(folder, sel_registerName("account")) : nil;
+            NSString *acctName = account ? ((id (*)(id, SEL))objc_msgSend)(account, sel_registerName("name")) : nil;
+            if (acctName.length > 0) meta[@"account"] = acctName;
+        } @catch (NSException *e) {}
+    }
+    if ([metadataFields containsObject:@"pinned"]) { BOOL v = NO; @try { v = ((BOOL (*)(id, SEL))objc_msgSend)(note, sel_registerName("isPinned")); } @catch (NSException *e) {} meta[@"pinned"] = @(v); }
+    if ([metadataFields containsObject:@"locked"]) { BOOL v = NO; @try { v = ((BOOL (*)(id, SEL))objc_msgSend)(note, sel_registerName("isLocked")); } @catch (NSException *e) {} meta[@"locked"] = @(v); }
+    if ([metadataFields containsObject:@"hasChecklist"]) { BOOL v = NO; @try { v = ((BOOL (*)(id, SEL))objc_msgSend)(note, sel_registerName("hasChecklist")); } @catch (NSException *e) {} meta[@"hasChecklist"] = @(v); }
+    if ([metadataFields containsObject:@"hasTags"]) { BOOL v = NO; @try { v = ((BOOL (*)(id, SEL))objc_msgSend)(note, sel_registerName("hasTags")); } @catch (NSException *e) {} meta[@"hasTags"] = @(v); }
+    if ([metadataFields containsObject:@"attachmentCount"]) { @try { id atts = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attachments")); meta[@"attachmentCount"] = @((NSUInteger)(atts ? [atts count] : 0)); } @catch (NSException *e) {} }
+    if ([metadataFields containsObject:@"snippet"]) { @try { NSString *snippet = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("snippet")); if (snippet.length > 0) meta[@"snippet"] = snippet; } @catch (NSException *e) {} }
+    if ([metadataFields containsObject:@"url"]) {
+        @try { Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities"); NSURL *appURL = ICAppURLUtilities ? ((id (*)(id, SEL, id))objc_msgSend)(ICAppURLUtilities, sel_registerName("appURLForNote:"), note) : nil; if (appURL) meta[@"url"] = [appURL absoluteString]; } @catch (NSException *e) {}
+    }
+    return meta;
+}
+
+static void appendYAMLMetadata(NSMutableString *content, NSDictionary *meta) {
+    [content appendString:@"---\n"];
+    for (NSString *key in @[@"title", @"folder", @"created", @"modified", @"id", @"account", @"pinned", @"locked", @"hasChecklist", @"hasTags", @"attachmentCount", @"snippet", @"url"]) {
+        id value = meta[key];
+        if (!value) continue;
+        if ([value isKindOfClass:[NSNumber class]]) {
+            const char *ctype = [value objCType];
+            if (strcmp(ctype, @encode(BOOL)) == 0) [content appendFormat:@"%@: %@\n", key, [value boolValue] ? @"true" : @"false"];
+            else [content appendFormat:@"%@: %@\n", key, value];
+        } else {
+            [content appendFormat:@"%@: %@\n", key, yamlScalar(value)];
+        }
+    }
+    [content appendString:@"---\n\n"];
+}
+
+static id syncEnsureFolder(id viewContext, NSString *folderName);
+static id syncCreateNote(id viewContext, NSString *folderName, NSString *title, NSString *body);
+static void syncApplyNoteDates(id viewContext, id note, NSDate *created, NSDate *modified, BOOL dryRun);
+static NSDate *syncFileCreationDate(NSString *path);
+static NSDate *syncFileModificationDate(NSString *path);
+
 // Export every (non-locked) note as one file with YAML frontmatter.
 // Mirrors folder hierarchy under outputPath. Locked notes are skipped.
-static int cmdExport(id viewContext, NSString *outputPath, NSString *folderFilter, NSString *format, BOOL preserveRoundTrip, NSSet *metadataFields) {
+static int cmdExport(id viewContext, NSString *outputPath, NSString *folderFilter, NSString *format, BOOL preserveRoundTrip, NSSet *metadataFields, BOOL metadataJSON) {
     if (!outputPath || outputPath.length == 0) errorExit(@"--output required");
     if (!format) format = @"md";
     BOOL isMarkdown = NO;
@@ -2521,78 +2572,9 @@ static int cmdExport(id viewContext, NSString *outputPath, NSString *folderFilte
         }
         [usedPaths addObject:candidate];
 
+        NSMutableDictionary *metadata = exportMetadataForNote(note, title, folderPath, createdDate, modifiedDate, metadataFields ?: [NSSet set]);
         NSMutableString *content = [NSMutableString string];
-        [content appendString:@"---\n"];
-        [content appendFormat:@"title: %@\n", yamlScalar(title)];
-        if (folderPath && folderPath.length > 0) {
-            [content appendFormat:@"folder: %@\n", yamlScalar(folderPath)];
-        }
-        if (createdDate)  [content appendFormat:@"created: %@\n",  dateToISO(createdDate)];
-        if (modifiedDate) [content appendFormat:@"modified: %@\n", dateToISO(modifiedDate)];
-
-        // Optional metadata fields (additive; controlled by --metadata flag).
-        if ([metadataFields containsObject:@"id"]) {
-            @try {
-                NSString *noteID = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("identifier"));
-                if (noteID && noteID.length > 0) [content appendFormat:@"id: %@\n", yamlScalar(noteID)];
-            } @catch (NSException *e) {}
-        }
-        if ([metadataFields containsObject:@"account"]) {
-            @try {
-                id folder = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("folder"));
-                id account = folder ? ((id (*)(id, SEL))objc_msgSend)(folder, sel_registerName("account")) : nil;
-                NSString *acctName = nil;
-                if (account) {
-                    @try { acctName = ((id (*)(id, SEL))objc_msgSend)(account, sel_registerName("name")); } @catch (NSException *e) {}
-                }
-                if (acctName && acctName.length > 0) [content appendFormat:@"account: %@\n", yamlScalar(acctName)];
-            } @catch (NSException *e) {}
-        }
-        if ([metadataFields containsObject:@"pinned"]) {
-            BOOL v = NO;
-            @try { v = ((BOOL (*)(id, SEL))objc_msgSend)(note, sel_registerName("isPinned")); } @catch (NSException *e) {}
-            [content appendFormat:@"pinned: %@\n", v ? @"true" : @"false"];
-        }
-        if ([metadataFields containsObject:@"locked"]) {
-            BOOL v = NO;
-            @try { v = ((BOOL (*)(id, SEL))objc_msgSend)(note, sel_registerName("isLocked")); } @catch (NSException *e) {}
-            [content appendFormat:@"locked: %@\n", v ? @"true" : @"false"];
-        }
-        if ([metadataFields containsObject:@"hasChecklist"]) {
-            BOOL v = NO;
-            @try { v = ((BOOL (*)(id, SEL))objc_msgSend)(note, sel_registerName("hasChecklist")); } @catch (NSException *e) {}
-            [content appendFormat:@"hasChecklist: %@\n", v ? @"true" : @"false"];
-        }
-        if ([metadataFields containsObject:@"hasTags"]) {
-            BOOL v = NO;
-            @try { v = ((BOOL (*)(id, SEL))objc_msgSend)(note, sel_registerName("hasTags")); } @catch (NSException *e) {}
-            [content appendFormat:@"hasTags: %@\n", v ? @"true" : @"false"];
-        }
-        if ([metadataFields containsObject:@"attachmentCount"]) {
-            @try {
-                id atts = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("attachments"));
-                NSUInteger count = atts ? [atts count] : 0;
-                [content appendFormat:@"attachmentCount: %lu\n", (unsigned long)count];
-            } @catch (NSException *e) {}
-        }
-        if ([metadataFields containsObject:@"snippet"]) {
-            @try {
-                NSString *snippet = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("snippet"));
-                if (snippet && snippet.length > 0) [content appendFormat:@"snippet: %@\n", yamlScalar(snippet)];
-            } @catch (NSException *e) {}
-        }
-        if ([metadataFields containsObject:@"url"]) {
-            @try {
-                Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities");
-                if (ICAppURLUtilities) {
-                    NSURL *appURL = ((id (*)(id, SEL, id))objc_msgSend)(
-                        ICAppURLUtilities, sel_registerName("appURLForNote:"), note);
-                    if (appURL) [content appendFormat:@"url: %@\n", yamlScalar([appURL absoluteString])];
-                }
-            } @catch (NSException *e) {}
-        }
-
-        [content appendString:@"---\n\n"];
+        if (!metadataJSON) appendYAMLMetadata(content, metadata);
 
         if (isMarkdown) {
             NSString *body;
@@ -2636,6 +2618,14 @@ static int cmdExport(id viewContext, NSString *outputPath, NSString *folderFilte
                     [candidate UTF8String], [[writeErr localizedDescription] UTF8String]);
             continue;
         }
+        if (metadataJSON) {
+            NSString *jsonPath = [candidate stringByAppendingPathExtension:@"json"];
+            NSData *json = [NSJSONSerialization dataWithJSONObject:metadata options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:&writeErr];
+            if (!json || ![json writeToFile:jsonPath options:NSDataWritingAtomic error:&writeErr]) {
+                fprintf(stderr, "Failed to write %s: %s\n", [jsonPath UTF8String], [[writeErr localizedDescription] UTF8String]);
+                continue;
+            }
+        }
         written++;
     }
 
@@ -2645,7 +2635,645 @@ static int cmdExport(id viewContext, NSString *outputPath, NSString *folderFilte
     }
     return 0;
 }
+static NSDictionary *importSidecarMetadata(NSString *path) {
+    NSData *data = [NSData dataWithContentsOfFile:[path stringByAppendingPathExtension:@"json"]];
+    if (!data) return @{};
+    NSError *err = nil;
+    id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:&err];
+    if (err || ![obj isKindOfClass:[NSDictionary class]]) return @{};
+    return obj;
+}
 
+static NSString *importMarkdownBody(NSString *path) {
+    NSError *err = nil;
+    NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&err];
+    if (!content) errorExit([NSString stringWithFormat:@"Failed to read %@: %@", path, err]);
+    return content;
+}
+
+static int cmdImport(id viewContext, NSString *inputPath, NSString *rootFolder, BOOL metadataJSON) {
+    if (!inputPath || inputPath.length == 0) errorExit(@"--input required");
+    NSString *input = [inputPath stringByExpandingTildeInPath];
+    NSString *folderRoot = rootFolder ?: @"Imported Notes";
+    syncEnsureFolder(viewContext, folderRoot);
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSDirectoryEnumerator *en = [fm enumeratorAtPath:input];
+    NSUInteger created = 0, updated = 0, skipped = 0;
+    NSString *rel;
+    while ((rel = [en nextObject])) {
+        if (![[rel pathExtension] isEqualToString:@"md"]) continue;
+        NSString *path = [input stringByAppendingPathComponent:rel];
+        BOOL isDir = NO;
+        if (![fm fileExistsAtPath:path isDirectory:&isDir] || isDir) continue;
+
+        NSDictionary *meta = metadataJSON ? importSidecarMetadata(path) : @{};
+        NSString *title = meta[@"title"];
+        if (!title || title.length == 0) title = [[rel lastPathComponent] stringByDeletingPathExtension];
+        NSString *targetFolder = meta[@"folder"];
+        if (!targetFolder || targetFolder.length == 0) {
+            NSString *dir = [rel stringByDeletingLastPathComponent];
+            targetFolder = (!dir || [dir isEqualToString:@"."] || dir.length == 0) ? folderRoot : [folderRoot stringByAppendingPathComponent:dir];
+        }
+        syncEnsureFolder(viewContext, targetFolder);
+        NSString *body = importMarkdownBody(path);
+        NSDate *createdDate = dateFromISO(meta[@"created"]) ?: syncFileCreationDate(path);
+        NSDate *modifiedDate = dateFromISO(meta[@"modified"]) ?: syncFileModificationDate(path);
+
+        NSString *noteID = meta[@"id"];
+        id note = noteID.length > 0 ? findNoteByID(viewContext, noteID) : nil;
+        if (note) {
+            cmdWriteMarkdownWithString(note, viewContext, body, NO, NO, NO);
+            note = findNoteByID(viewContext, noteID);
+            syncApplyNoteDates(viewContext, note, createdDate, modifiedDate, NO);
+            updated++;
+        } else {
+            note = syncCreateNote(viewContext, targetFolder, title, body);
+            syncApplyNoteDates(viewContext, note, createdDate, modifiedDate, NO);
+            created++;
+        }
+    }
+    printJSON(@{@"input": input, @"folder": folderRoot, @"created": @(created), @"updated": @(updated), @"skipped": @(skipped), @"metadataJSON": @(metadataJSON)});
+    return 0;
+}
+
+
+
+// --- Two-way sync ---
+
+static NSString *syncDefaultDir(void) {
+    return [@"~/agent-documents/agent-notes" stringByExpandingTildeInPath];
+}
+
+static NSString *syncDefaultStatePath(NSString *dir) {
+    return [dir stringByAppendingPathComponent:@".notekit-sync.json"];
+}
+
+static NSString *syncHash(NSString *s) {
+    const unsigned char *bytes = (const unsigned char *)[[s ?: @"" dataUsingEncoding:NSUTF8StringEncoding] bytes];
+    NSUInteger len = [[s ?: @"" dataUsingEncoding:NSUTF8StringEncoding] length];
+    unsigned long long h = 1469598103934665603ULL;
+    for (NSUInteger i = 0; i < len; i++) { h ^= bytes[i]; h *= 1099511628211ULL; }
+    return [NSString stringWithFormat:@"%016llx", h];
+}
+
+static NSString *syncContentHash(NSString *s) {
+    NSString *normalized = s ?: @"";
+    while ([normalized hasSuffix:@"\n"]) normalized = [normalized substringToIndex:normalized.length - 1];
+    return syncHash(normalized);
+}
+
+static NSDictionary *syncLoadJSON(NSString *path) {
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if (!data) return @{};
+    NSError *err = nil;
+    id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:&err];
+    if (err || ![obj isKindOfClass:[NSDictionary class]]) return @{};
+    return obj;
+}
+
+static void syncWriteJSON(NSDictionary *obj, NSString *path) {
+    NSError *err = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:obj options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:&err];
+    if (err) errorExit([NSString stringWithFormat:@"Failed to encode sync state: %@", err]);
+    NSString *tmp = [path stringByAppendingPathExtension:@"tmp"];
+    if (![data writeToFile:tmp options:NSDataWritingAtomic error:&err]) errorExit([NSString stringWithFormat:@"Failed to write sync state: %@", err]);
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm removeItemAtPath:path error:nil];
+    if (![fm moveItemAtPath:tmp toPath:path error:&err]) errorExit([NSString stringWithFormat:@"Failed to replace sync state: %@", err]);
+}
+
+static NSString *syncYamlValue(NSString *s) {
+    if (!s) return @"";
+    NSString *trimmed = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([trimmed hasPrefix:@"\""] && [trimmed hasSuffix:@"\""] && trimmed.length >= 2) {
+        trimmed = [trimmed substringWithRange:NSMakeRange(1, trimmed.length - 2)];
+        trimmed = [trimmed stringByReplacingOccurrencesOfString:@"\\\"" withString:@"\""];
+        trimmed = [trimmed stringByReplacingOccurrencesOfString:@"\\n" withString:@"\n"];
+        trimmed = [trimmed stringByReplacingOccurrencesOfString:@"\\r" withString:@"\r"];
+        trimmed = [trimmed stringByReplacingOccurrencesOfString:@"\\t" withString:@"\t"];
+        trimmed = [trimmed stringByReplacingOccurrencesOfString:@"\\\\" withString:@"\\"];
+    }
+    return trimmed;
+}
+
+static NSDictionary *syncParseMarkdownFile(NSString *path) {
+    NSError *err = nil;
+    NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&err];
+    if (!content) return nil;
+    NSMutableDictionary *meta = [NSMutableDictionary dictionary];
+    NSString *body = content;
+    if ([content hasPrefix:@"---\n"]) {
+        NSRange end = [content rangeOfString:@"\n---\n" options:0 range:NSMakeRange(4, content.length - 4)];
+        if (end.location != NSNotFound) {
+            NSString *front = [content substringWithRange:NSMakeRange(4, end.location - 4)];
+            for (NSString *line in [front componentsSeparatedByString:@"\n"]) {
+                NSRange colon = [line rangeOfString:@":"];
+                if (colon.location == NSNotFound) continue;
+                NSString *key = [[line substringToIndex:colon.location] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                NSString *val = [line substringFromIndex:colon.location + 1];
+                if (key.length > 0) meta[key] = syncYamlValue(val);
+            }
+            NSUInteger bodyStart = end.location + end.length;
+            body = bodyStart <= content.length ? [content substringFromIndex:bodyStart] : @"";
+            if ([body hasPrefix:@"\n"]) body = [body substringFromIndex:1];
+        }
+    }
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+    NSDate *mtime = attrs[NSFileModificationDate];
+    return @{@"metadata": meta, @"body": body ?: @"", @"modified": mtime ? dateToISO(mtime) : @"", @"hash": syncContentHash(body ?: @"")};
+}
+
+static NSString *syncRenderFile(NSString *noteID, NSString *title, NSString *folder, NSDate *created, NSDate *modified, NSString *body) {
+    NSMutableString *out = [NSMutableString stringWithString:body ?: @""];
+    if (![out hasSuffix:@"\n"]) [out appendString:@"\n"];
+    return out;
+}
+
+static BOOL syncSetFileModifiedDate(NSString *path, NSDate *modified, BOOL dryRun) {
+    if (dryRun || !modified) return YES;
+    NSError *err = nil;
+    if (![[NSFileManager defaultManager] setAttributes:@{NSFileModificationDate: modified} ofItemAtPath:path error:&err]) {
+        errorExit([NSString stringWithFormat:@"Failed to set mtime for %@: %@", path, err]);
+    }
+    return YES;
+}
+
+static BOOL syncWriteString(NSString *content, NSString *path, BOOL dryRun) {
+    if (dryRun) return YES;
+    NSError *err = nil;
+    NSString *dir = [path stringByDeletingLastPathComponent];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&err];
+    if (err) errorExit([NSString stringWithFormat:@"Failed to create sync dir: %@", err]);
+    NSString *tmp = [path stringByAppendingPathExtension:@"tmp"];
+    if (![content writeToFile:tmp atomically:YES encoding:NSUTF8StringEncoding error:&err]) errorExit([NSString stringWithFormat:@"Failed to write sync file: %@", err]);
+    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    if (![[NSFileManager defaultManager] moveItemAtPath:tmp toPath:path error:&err]) errorExit([NSString stringWithFormat:@"Failed to replace sync file: %@", err]);
+    return YES;
+}
+
+static NSString *syncAvailablePath(NSString *dir, NSString *title, NSMutableSet *used, NSString *existingRel) {
+    if (existingRel.length > 0) {
+        [used addObject:existingRel];
+        return [dir stringByAppendingPathComponent:existingRel];
+    }
+    NSString *base = sanitizeFilenameComponent(title ?: @"Untitled");
+    NSString *rel = [base stringByAppendingPathExtension:@"md"];
+    NSUInteger n = 2;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    while ([used containsObject:rel] || [fm fileExistsAtPath:[dir stringByAppendingPathComponent:rel]]) {
+        rel = [[NSString stringWithFormat:@"%@-%lu", base, (unsigned long)n++] stringByAppendingPathExtension:@"md"];
+    }
+    [used addObject:rel];
+    return [dir stringByAppendingPathComponent:rel];
+}
+
+static NSString *syncRelativeFolder(NSString *rootFolder, NSString *folderPath) {
+    if (!folderPath || !rootFolder) return @"";
+    if ([folderPath isEqualToString:rootFolder]) return @"";
+    NSString *prefix = [rootFolder stringByAppendingString:@"/"];
+    if ([folderPath hasPrefix:prefix]) return [folderPath substringFromIndex:prefix.length];
+    return @"";
+}
+
+static BOOL syncFolderIsUnderRoot(NSString *rootFolder, NSString *folderPath) {
+    if (!rootFolder || rootFolder.length == 0) return YES;
+    if ([folderPath isEqualToString:rootFolder]) return YES;
+    return [folderPath hasPrefix:[rootFolder stringByAppendingString:@"/"]];
+}
+
+static NSString *syncFolderForFile(NSString *rootFolder, NSString *relPath) {
+    NSString *dir = [relPath stringByDeletingLastPathComponent];
+    if (!dir || [dir isEqualToString:@"."] || dir.length == 0) return rootFolder;
+    return [rootFolder stringByAppendingPathComponent:dir];
+}
+
+static id syncFolderObjectForPath(id viewContext, NSString *path) {
+    id fallback = nil;
+    for (id folder in fetchFolders(viewContext)) {
+        if (folderMatchesNameOrPath(folder, path)) {
+            if (!fallback) fallback = folder;
+            NSString *fp = folderPathForFolder(folder);
+            if (fp && [fp isEqualToString:path]) return folder;
+        }
+    }
+    return fallback;
+}
+
+static void syncCreateFolderInParent(id viewContext, NSString *name, id parentFolder) {
+    id account = nil;
+    if (parentFolder) account = ((id (*)(id, SEL))objc_msgSend)(parentFolder, sel_registerName("account"));
+    if (!account) {
+        for (id f in fetchFolders(viewContext)) {
+            account = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("account"));
+            if (account) break;
+        }
+    }
+    if (!account) errorExit(@"No account found");
+    Class ICFolder = NSClassFromString(@"ICFolder");
+    id newFolder = ((id (*)(id, SEL, id))objc_msgSend)(ICFolder, sel_registerName("newFolderInAccount:"), account);
+    if (!newFolder) errorExit(@"Failed to create folder");
+    ((void (*)(id, SEL, id))objc_msgSend)(newFolder, sel_registerName("setTitle:"), name);
+    if (parentFolder) ((void (*)(id, SEL, id))objc_msgSend)(newFolder, sel_registerName("setParent:"), parentFolder);
+    NSError *error = nil;
+    [viewContext save:&error];
+    if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
+}
+
+static id syncEnsureFolder(id viewContext, NSString *folderName) {
+    NSArray *folders = fetchFolders(viewContext);
+    for (id folder in folders) {
+        if (folderMatchesNameOrPath(folder, folderName)) return folder;
+    }
+    NSArray *parts = [folderName componentsSeparatedByString:@"/"];
+    NSString *current = @"";
+    for (NSString *part in parts) {
+        if (part.length == 0) continue;
+        NSString *parent = current.length > 0 ? current : nil;
+        current = current.length > 0 ? [current stringByAppendingPathComponent:part] : part;
+        BOOL exists = NO;
+        for (id folder in fetchFolders(viewContext)) {
+            if (folderMatchesNameOrPath(folder, current)) { exists = YES; break; }
+        }
+        if (!exists) {
+            id parentFolder = parent ? syncFolderObjectForPath(viewContext, parent) : nil;
+            syncCreateFolderInParent(viewContext, part, parentFolder);
+        }
+    }
+    folders = fetchFolders(viewContext);
+    for (id folder in folders) {
+        if (folderMatchesNameOrPath(folder, folderName)) return folder;
+    }
+    errorExit([NSString stringWithFormat:@"Folder not found after create: %@", folderName]);
+    return nil;
+}
+
+static NSDate *syncDateFromFileMetadata(NSDictionary *file, NSString *key) {
+    NSString *value = file[@"metadata"][key];
+    if (value.length > 0) return dateFromISO(value);
+    if ([key isEqualToString:@"modified"]) return dateFromISO(file[@"modified"]);
+    return nil;
+}
+
+static NSDate *syncFileCreationDate(NSString *path) {
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+    NSDate *created = attrs[NSFileCreationDate];
+    return created ?: attrs[NSFileModificationDate];
+}
+
+static NSDate *syncFileModificationDate(NSString *path) {
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+    return attrs[NSFileModificationDate];
+}
+
+static void syncApplyNoteDates(id viewContext, id note, NSDate *created, NSDate *modified, BOOL dryRun) {
+    if (dryRun || (!created && !modified)) return;
+    @try { if (created) ((void (*)(id, SEL, id))objc_msgSend)(note, sel_registerName("setCreationDate:"), created); } @catch (NSException *e) {}
+    @try { if (modified) ((void (*)(id, SEL, id))objc_msgSend)(note, sel_registerName("setModificationDate:"), modified); } @catch (NSException *e) {}
+    NSError *error = nil;
+    [viewContext save:&error];
+    if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
+}
+
+static id syncCreateNote(id viewContext, NSString *folderName, NSString *title, NSString *body) {
+    id note = createEmptyNoteInFolder(viewContext, folderName);
+    NSMutableDictionary *titlePara = [NSMutableDictionary dictionary];
+    titlePara[@"style"] = @(0);
+    titlePara[@"indent"] = @(0);
+    titlePara[@"text"] = title ?: @"Untitled";
+    NSMutableArray *model = [NSMutableArray arrayWithObject:titlePara];
+    [model addObjectsFromArray:markdownToParaModel(body ?: @"")];
+    NSString *identifier = noteToDict(note)[@"id"];
+    int savedStdout = dup(STDOUT_FILENO);
+    int devNull = open("/dev/null", O_WRONLY);
+    if (savedStdout >= 0 && devNull >= 0) dup2(devNull, STDOUT_FILENO);
+    if (devNull >= 0) close(devNull);
+    cmdWriteMarkdownFullReplace(note, viewContext, identifier, model, NO, NO);
+    fflush(stdout);
+    if (savedStdout >= 0) { dup2(savedStdout, STDOUT_FILENO); close(savedStdout); }
+    return findNoteByID(viewContext, identifier);
+}
+
+static NSArray *syncMarkdownFiles(NSString *dir) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSDirectoryEnumerator *en = [fm enumeratorAtPath:dir];
+    NSMutableArray *files = [NSMutableArray array];
+    NSString *rel;
+    while ((rel = [en nextObject])) {
+        if ([rel hasPrefix:@".notekit-"] || [rel containsString:@"/.notekit-"]) continue;
+        if ([rel containsString:@".local-conflict-"]) continue;
+        if ([[rel pathExtension] isEqualToString:@"md"]) [files addObject:rel];
+    }
+    return files;
+}
+
+static void syncRemoveEmptyDirectories(NSString *root, BOOL dryRun) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSDirectoryEnumerator *en = [fm enumeratorAtPath:root];
+    NSMutableArray *dirs = [NSMutableArray array];
+    NSString *rel;
+    while ((rel = [en nextObject])) {
+        BOOL isDir = NO;
+        NSString *path = [root stringByAppendingPathComponent:rel];
+        if ([fm fileExistsAtPath:path isDirectory:&isDir] && isDir) [dirs addObject:path];
+    }
+    [dirs sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        return a.length < b.length ? NSOrderedDescending : (a.length > b.length ? NSOrderedAscending : NSOrderedSame);
+    }];
+    for (NSString *path in dirs) {
+        NSArray *items = [fm contentsOfDirectoryAtPath:path error:nil];
+        if (items.count == 0 && !dryRun) [fm removeItemAtPath:path error:nil];
+    }
+}
+
+static int cmdSync(id viewContext, NSString *dirArg, NSString *folderName, NSString *stateArg, BOOL dryRun) {
+    NSString *dir = [(dirArg ?: syncDefaultDir()) stringByExpandingTildeInPath];
+    NSString *folder = folderName ?: @"agent-notes";
+    NSString *statePath = [(stateArg ?: syncDefaultStatePath(dir)) stringByExpandingTildeInPath];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSError *err = nil;
+    if (![fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&err]) errorExit([NSString stringWithFormat:@"Cannot create sync directory: %@", err]);
+    syncEnsureFolder(viewContext, folder);
+
+    NSDictionary *loadedState = syncLoadJSON(statePath);
+    NSMutableDictionary *state = [NSMutableDictionary dictionaryWithDictionary:loadedState];
+    NSMutableDictionary *newState = [NSMutableDictionary dictionary];
+    NSMutableDictionary *filesByID = [NSMutableDictionary dictionary];
+    NSMutableArray *newFiles = [NSMutableArray array];
+    for (NSString *rel in syncMarkdownFiles(dir)) {
+        NSDictionary *file = syncParseMarkdownFile([dir stringByAppendingPathComponent:rel]);
+        if (!file) continue;
+        NSString *fid = file[@"metadata"][@"id"];
+        if (fid.length == 0) {
+            for (NSString *stateID in state) {
+                if ([state[stateID][@"path"] isEqualToString:rel]) { fid = stateID; break; }
+            }
+        }
+        NSMutableDictionary *entry = [NSMutableDictionary dictionaryWithDictionary:file];
+        entry[@"path"] = rel;
+        entry[@"targetFolder"] = syncFolderForFile(folder, rel);
+        if (fid.length > 0) filesByID[fid] = entry;
+        else [newFiles addObject:entry];
+    }
+
+    NSArray *allNotes = fetchNotes(viewContext, nil, 0);
+    NSMutableArray *notes = [NSMutableArray array];
+    for (id note in allNotes) {
+        NSDictionary *d = noteToDict(note);
+        if (syncFolderIsUnderRoot(folder, d[@"folderPath"] ?: d[@"folder"])) [notes addObject:note];
+    }
+    NSMutableDictionary *notesByID = [NSMutableDictionary dictionary];
+    for (id note in notes) {
+        NSString *identifier = noteToDict(note)[@"id"];
+        if (identifier) notesByID[identifier] = note;
+    }
+    NSMutableSet *usedPaths = [NSMutableSet setWithArray:[filesByID.allValues valueForKey:@"path"]];
+    NSUInteger notesToFiles = 0, filesToNotes = 0, createdNotes = 0, conflicts = 0, unchanged = 0;
+
+    for (id note in notes) {
+        NSDictionary *dict = noteToDict(note);
+        NSString *noteID = dict[@"id"];
+        NSString *title = dict[@"title"] ?: @"Untitled";
+        NSDate *noteCreated = nil;
+        NSDate *noteModified = nil;
+        @try { noteCreated = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("creationDate")); } @catch (NSException *e) {}
+        @try { noteModified = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("modificationDate")); } @catch (NSException *e) {}
+        NSString *noteBody = syncNoteBody(note) ?: @"";
+        NSString *noteHash = syncContentHash(noteBody);
+        NSDictionary *old = state[noteID] ?: @{};
+        NSDictionary *file = filesByID[noteID];
+        NSString *rel = file[@"path"] ?: old[@"path"];
+        if (!rel || rel.length == 0) {
+            NSString *noteFolderPath = dict[@"folderPath"] ?: dict[@"folder"];
+            NSString *relativeFolder = syncRelativeFolder(folder, noteFolderPath);
+            NSString *name = [sanitizeFilenameComponent(title) stringByAppendingPathExtension:@"md"];
+            rel = relativeFolder.length > 0 ? [relativeFolder stringByAppendingPathComponent:name] : name;
+        }
+        NSString *path = syncAvailablePath(dir, title, usedPaths, rel);
+        rel = [path substringFromIndex:dir.length + 1];
+        NSString *oldHash = old[@"hash"];
+        NSString *oldNoteHash = old[@"noteHash"] ?: oldHash;
+        NSString *oldFileHash = old[@"fileHash"] ?: oldHash;
+        BOOL noteChanged = oldNoteHash && ![oldNoteHash isEqualToString:noteHash];
+        BOOL fileExists = file != nil;
+        BOOL fileDeleted = !fileExists && old[@"path"];
+        BOOL fileChanged = fileExists && oldFileHash && ![oldFileHash isEqualToString:file[@"hash"]];
+        BOOL wroteFileFromNote = NO;
+
+        if (fileDeleted) {
+            if (!dryRun) {
+                ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("markForDeletion"));
+                [viewContext deleteObject:note];
+                NSError *deleteError = nil;
+                [viewContext save:&deleteError];
+                if (deleteError) errorExit([NSString stringWithFormat:@"Save error: %@", deleteError]);
+            }
+        } else if (fileExists && noteChanged && fileChanged && ![file[@"hash"] isEqualToString:noteHash]) {
+            NSString *stamp = [[dateToISO([NSDate date]) stringByReplacingOccurrencesOfString:@":" withString:@""] stringByReplacingOccurrencesOfString:@"-" withString:@""];
+            NSString *conflict = [[path stringByDeletingPathExtension] stringByAppendingFormat:@".local-conflict-%@.md", stamp];
+            NSString *renderFolder = file[@"targetFolder"] ?: (dict[@"folderPath"] ?: folder);
+            syncWriteString(syncRenderFile(noteID, title, renderFolder, noteCreated, noteModified, file[@"body"]), conflict, dryRun);
+            syncWriteString(syncRenderFile(noteID, title, renderFolder, noteCreated, noteModified, noteBody), path, dryRun);
+            syncSetFileModifiedDate(path, noteModified, dryRun);
+            fprintf(stderr, "Conflict: %s changed in Notes and on disk; kept Notes version and wrote local copy to %s\n", [title UTF8String], [conflict UTF8String]);
+            wroteFileFromNote = YES;
+            notesToFiles++;
+            conflicts++;
+        } else if (fileExists && fileChanged) {
+            int savedStdout = dup(STDOUT_FILENO);
+            int devNull = open("/dev/null", O_WRONLY);
+            if (savedStdout >= 0 && devNull >= 0) dup2(devNull, STDOUT_FILENO);
+            if (devNull >= 0) close(devNull);
+            NSMutableArray *replacementModel = [NSMutableArray arrayWithArray:markdownToParaModel(file[@"body"] ?: @"")];
+            cmdWriteMarkdownFullReplace(note, viewContext, noteID, replacementModel, dryRun, NO);
+            fflush(stdout);
+            if (savedStdout >= 0) { dup2(savedStdout, STDOUT_FILENO); close(savedStdout); }
+            note = findNoteByID(viewContext, noteID);
+            NSString *filePath = [dir stringByAppendingPathComponent:file[@"path"]];
+            NSDate *fileCreatedDate = syncFileCreationDate(filePath);
+            NSDate *fileModifiedDate = syncFileModificationDate(filePath);
+            syncApplyNoteDates(viewContext, note, fileCreatedDate, fileModifiedDate, dryRun);
+            note = findNoteByID(viewContext, noteID);
+            noteBody = syncNoteBody(note) ?: file[@"body"];
+            noteHash = syncContentHash(noteBody);
+            @try { noteCreated = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("creationDate")); } @catch (NSException *e) {}
+            @try { noteModified = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("modificationDate")); } @catch (NSException *e) {}
+            filesToNotes++;
+        } else if (!fileExists || noteChanged || !oldHash) {
+            NSString *renderFolder = dict[@"folderPath"] ?: folder;
+            syncWriteString(syncRenderFile(noteID, title, renderFolder, noteCreated, noteModified, noteBody), path, dryRun);
+            syncSetFileModifiedDate(path, noteModified, dryRun);
+            wroteFileFromNote = YES;
+            notesToFiles++;
+        } else {
+            unchanged++;
+        }
+
+        if (!fileDeleted) {
+            NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+            NSDate *fileModified = attrs[NSFileModificationDate];
+            // After writing the note body to disk, the file holds noteBody, so
+            // its content hash is noteHash — not the pre-write parse in file[@"hash"].
+            // Recording the stale parse would make the next pass see a phantom
+            // file change and echo it back to the note.
+            NSString *fileHashForState = wroteFileFromNote ? noteHash : (fileExists ? file[@"hash"] : (noteHash ?: @""));
+            newState[noteID] = @{@"id": noteID ?: @"", @"title": title, @"path": rel ?: @"", @"hash": noteHash ?: @"", @"noteHash": noteHash ?: @"", @"fileHash": fileHashForState ?: @"", @"lastNoteModified": noteModified ? dateToISO(noteModified) : @"", @"lastFileModified": fileModified ? dateToISO(fileModified) : @""};
+        }
+    }
+
+    for (NSString *noteID in state) {
+        if (notesByID[noteID]) continue;
+        NSDictionary *old = state[noteID];
+        NSString *rel = old[@"path"];
+        if (rel.length == 0) continue;
+        NSString *path = [dir stringByAppendingPathComponent:rel];
+        if ([fm fileExistsAtPath:path]) {
+            if (!dryRun) [fm removeItemAtPath:path error:nil];
+        }
+    }
+
+    for (NSDictionary *file in newFiles) {
+        NSString *title = file[@"metadata"][@"title"];
+        if (!title || title.length == 0) title = [[[file[@"path"] lastPathComponent] stringByDeletingPathExtension] copy];
+        if (!dryRun) {
+            NSString *targetFolder = file[@"targetFolder"] ?: folder;
+            syncEnsureFolder(viewContext, targetFolder);
+            id note = syncCreateNote(viewContext, targetFolder, title, file[@"body"]);
+            NSString *sourcePath = [dir stringByAppendingPathComponent:file[@"path"]];
+            NSDate *fileCreatedDate = syncFileCreationDate(sourcePath);
+            NSDate *fileModifiedDate = syncFileModificationDate(sourcePath);
+            syncApplyNoteDates(viewContext, note, fileCreatedDate, fileModifiedDate, NO);
+            NSDictionary *dict = noteToDict(note);
+            NSString *noteID = dict[@"id"];
+            NSDate *noteModified = nil;
+            @try { noteModified = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("modificationDate")); } @catch (NSException *e) {}
+            NSString *noteBody = syncNoteBody(note) ?: file[@"body"];
+            NSString *path = [dir stringByAppendingPathComponent:file[@"path"]];
+            NSDate *noteCreated = nil;
+            @try { noteCreated = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("creationDate")); } @catch (NSException *e) {}
+            NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+            NSDate *fileModified = attrs[NSFileModificationDate];
+            NSString *noteHash = syncContentHash(noteBody);
+            NSString *fileHash = syncContentHash(file[@"body"] ?: @"");
+            newState[noteID] = @{@"id": noteID ?: @"", @"title": title, @"path": file[@"path"] ?: @"", @"hash": noteHash, @"noteHash": noteHash, @"fileHash": fileHash, @"lastNoteModified": noteModified ? dateToISO(noteModified) : @"", @"lastFileModified": fileModified ? dateToISO(fileModified) : @""};
+        }
+        createdNotes++;
+    }
+
+    syncRemoveEmptyDirectories(dir, dryRun);
+    if (!dryRun) syncWriteJSON(newState, statePath);
+    NSDictionary *summary = @{@"dir": dir, @"folder": folder, @"notesToFiles": @(notesToFiles), @"filesToNotes": @(filesToNotes), @"createdNotes": @(createdNotes), @"conflicts": @(conflicts), @"unchanged": @(unchanged), @"dryRun": @(dryRun)};
+    printJSON(summary);
+    return conflicts > 0 ? 2 : 0;
+}
+
+static NSString *syncLockPath(NSString *statePath) {
+    return [statePath stringByAppendingPathExtension:@"lock"];
+}
+
+static int syncAcquireLock(NSString *statePath) {
+    NSString *lockPath = syncLockPath(statePath);
+    int fd = open([lockPath fileSystemRepresentation], O_CREAT | O_RDWR, 0644);
+    if (fd < 0) errorExit([NSString stringWithFormat:@"Failed to open sync lock: %@", lockPath]);
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if (errno == EWOULDBLOCK) errorExit([NSString stringWithFormat:@"Another sync daemon is already running for state %@", statePath]);
+        errorExit([NSString stringWithFormat:@"Failed to acquire sync lock: %@", lockPath]);
+    }
+    ftruncate(fd, 0);
+    NSString *info = [NSString stringWithFormat:@"pid=%d\nbinary=%@\nversion=%@\nstate=%@\n", getpid(), [[NSProcessInfo processInfo] arguments].firstObject ?: @"notekit", @NOTEKIT_VERSION, statePath];
+    write(fd, info.UTF8String, strlen(info.UTF8String));
+    return fd;
+}
+
+// Body renderer for sync. noteToMarkdownString escapes [ ] ( ) so the output
+// round-trips through write-markdown, but synced files are meant to be plain
+// human/agent-readable markdown (the fitness food-log watcher parses the
+// bracketed stat annotations directly). Strip only those bracket/paren escapes;
+// real note links keep their unescaped [text](url) form untouched. Hashing uses
+// this same output so a note and its file compare equal when in sync.
+static NSString *syncNoteBody(id note) {
+    NSString *body = noteToMarkdownString(note);
+    if (!body) return nil;
+    body = [body stringByReplacingOccurrencesOfString:@"\\[" withString:@"["];
+    body = [body stringByReplacingOccurrencesOfString:@"\\]" withString:@"]"];
+    body = [body stringByReplacingOccurrencesOfString:@"\\(" withString:@"("];
+    body = [body stringByReplacingOccurrencesOfString:@"\\)" withString:@")"];
+    return body;
+}
+
+static NSString *syncMainPathForConflictPath(NSString *path) {
+    NSString *name = [path lastPathComponent];
+    NSRange r = [name rangeOfString:@".local-conflict-" options:NSBackwardsSearch];
+    if (r.location == NSNotFound) return path;
+    NSString *prefix = [name substringToIndex:r.location];
+    NSString *mainName = [prefix stringByAppendingPathExtension:[path pathExtension]];
+    return [[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:mainName];
+}
+
+static int cmdSyncResolveConflict(id viewContext, NSString *fileArg, NSString *dirArg, NSString *folderName, NSString *stateArg, BOOL keepConflict) {
+    if (!fileArg || fileArg.length == 0) errorExit(@"--file required");
+    NSString *file = [fileArg stringByExpandingTildeInPath];
+    NSString *mainPath = syncMainPathForConflictPath(file);
+    NSString *dir = [(dirArg ?: syncDefaultDir()) stringByExpandingTildeInPath];
+    NSString *statePath = [(stateArg ?: syncDefaultStatePath(dir)) stringByExpandingTildeInPath];
+    NSString *folder = folderName ?: @"agent-notes";
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:file]) errorExit([NSString stringWithFormat:@"File not found: %@", file]);
+
+    NSError *err = nil;
+    if (![file isEqualToString:mainPath]) {
+        [fm removeItemAtPath:mainPath error:nil];
+        if (![fm copyItemAtPath:file toPath:mainPath error:&err]) errorExit([NSString stringWithFormat:@"Failed to copy conflict over main file: %@", err]);
+        if (!keepConflict && ![fm removeItemAtPath:file error:&err]) errorExit([NSString stringWithFormat:@"Failed to remove conflict file: %@", err]);
+    }
+
+    NSString *rel = [mainPath hasPrefix:[dir stringByAppendingString:@"/"]] ? [mainPath substringFromIndex:dir.length + 1] : nil;
+    if (!rel) errorExit([NSString stringWithFormat:@"Resolved file is not under sync dir %@", dir]);
+    NSMutableDictionary *state = [NSMutableDictionary dictionaryWithDictionary:syncLoadJSON(statePath)];
+    NSString *noteID = nil;
+    for (NSString *sid in state) {
+        if ([state[sid][@"path"] isEqualToString:rel]) { noteID = sid; break; }
+    }
+    if (!noteID) errorExit([NSString stringWithFormat:@"No synced note found for %@", rel]);
+    id note = findNoteByID(viewContext, noteID);
+    if (!note) errorExit([NSString stringWithFormat:@"Synced note not found with id: %@", noteID]);
+    NSString *body = importMarkdownBody(mainPath);
+    NSMutableArray *replacementModel = [NSMutableArray arrayWithArray:markdownToParaModel(body ?: @"")];
+    cmdWriteMarkdownFullReplace(note, viewContext, noteID, replacementModel, NO, NO);
+    note = findNoteByID(viewContext, noteID);
+    NSDate *created = syncFileCreationDate(mainPath);
+    NSDate *modified = syncFileModificationDate(mainPath);
+    syncApplyNoteDates(viewContext, note, created, modified, NO);
+    NSString *noteBody = syncNoteBody(note) ?: body;
+    NSString *hash = syncContentHash(noteBody);
+    NSDictionary *attrs = [fm attributesOfItemAtPath:mainPath error:nil];
+    NSDate *fileModified = attrs[NSFileModificationDate];
+    state[noteID] = @{@"id": noteID ?: @"", @"title": noteToDict(note)[@"title"] ?: [[rel lastPathComponent] stringByDeletingPathExtension], @"path": rel ?: @"", @"hash": hash ?: @"", @"noteHash": hash ?: @"", @"fileHash": syncContentHash(body ?: @"") ?: @"", @"lastNoteModified": modified ? dateToISO(modified) : @"", @"lastFileModified": fileModified ? dateToISO(fileModified) : @""};
+    syncWriteJSON(state, statePath);
+    printJSON(@{@"resolved": @YES, @"file": mainPath, @"folder": folder, @"noteId": noteID, @"keptConflict": @(keepConflict)});
+    return 0;
+}
+
+static int cmdSyncDaemon(id viewContext, NSString *dir, NSString *folder, NSString *state, NSTimeInterval interval, BOOL dryRun) {
+    if (interval <= 0) interval = 5;
+    NSString *syncDir = [(dir ?: syncDefaultDir()) stringByExpandingTildeInPath];
+    NSString *statePath = [(state ?: syncDefaultStatePath(syncDir)) stringByExpandingTildeInPath];
+    int lockFD = syncAcquireLock(statePath);
+    fprintf(stderr, "notekit sync-daemon starting pid=%d version=%s binary=%s dir=%s folder=%s state=%s interval=%.0f\n", getpid(), NOTEKIT_VERSION, [[[NSProcessInfo processInfo] arguments].firstObject UTF8String], [syncDir UTF8String], [(folder ?: @"agent-notes") UTF8String], [statePath UTF8String], interval);
+    while (1) {
+        @autoreleasepool {
+            // Notes.app edits land in the shared store out from under our
+            // long-lived context; drop cached object state each pass so the
+            // sync sees external note changes instead of stale fetched copies.
+            ((void (*)(id, SEL))objc_msgSend)(viewContext, sel_registerName("refreshAllObjects"));
+            cmdSync(viewContext, syncDir, folder, statePath, dryRun);
+        }
+        fflush(stdout); fflush(stderr);
+        [NSThread sleepForTimeInterval:interval];
+    }
+    close(lockFD);
+    return 0;
+}
 
 // --- Usage ---
 
@@ -2696,6 +3324,13 @@ static void usage(void) {
     fprintf(stderr,  "      backslash escaping is removed for clean human-readable output.\n");
     fprintf(stderr, "      Use --preserve-round-trip to keep <br> tags and char escapes so the\n");
     fprintf(stderr, "      output round-trips back through write-markdown.\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Two-way sync:\n");
+    fprintf(stderr, "  notekit sync [--dir <dir>] [--folder <name>] [--state <path>] [--dry-run]\n");
+    fprintf(stderr, "  notekit sync-daemon [--dir <dir>] [--folder <name>] [--state <path>] [--interval <seconds>] [--dry-run]\n");
+    fprintf(stderr, "      Defaults: --dir ~/agent-documents/agent-notes --folder agent-notes\n");
+    fprintf(stderr, "      Sync stores metadata in .notekit-sync.json and YAML frontmatter.\n");
+    fprintf(stderr, "      Deletions are non-destructive by default; Notes wins conflicts and local copies are preserved.\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Debugging / Internals:\n");
     fprintf(stderr, "  These operate on character offsets into the raw attribute stream. You should\n");

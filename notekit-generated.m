@@ -217,6 +217,18 @@ static NSString *dateToISO(NSDate *date) {
     return [fmt stringFromDate:date];
 }
 
+static NSDate *dateFromISO(NSString *iso) {
+    if (!iso || iso.length == 0) return nil;
+    NSISO8601DateFormatter *fmt = [[NSISO8601DateFormatter alloc] init];
+    NSDate *date = [fmt dateFromString:iso];
+    if (date) return date;
+    NSDateFormatter *fallback = [[NSDateFormatter alloc] init];
+    fallback.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    fallback.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss'Z'";
+    fallback.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+    return [fallback dateFromString:iso];
+}
+
 static void printJSON(id obj) {
     NSError *error = nil;
     NSData *data = [NSJSONSerialization dataWithJSONObject:obj
@@ -251,23 +263,60 @@ static NSArray *fetchFolders(id viewContext) {
     return folders;
 }
 
+static NSString *folderPathForFolder(id folder) {
+    if (!folder) return nil;
+    NSMutableArray *components = [NSMutableArray array];
+    while (folder) {
+        NSString *title = nil;
+        @try { title = ((id (*)(id, SEL))objc_msgSend)(folder, sel_registerName("title")); } @catch (NSException *e) {}
+        if (title && title.length > 0) [components insertObject:title atIndex:0];
+        @try { folder = ((id (*)(id, SEL))objc_msgSend)(folder, sel_registerName("parentFolder")); } @catch (NSException *e) { folder = nil; }
+    }
+    return components.count > 0 ? [components componentsJoinedByString:@"/"] : nil;
+}
+
+static BOOL folderMatchesNameOrPath(id folder, NSString *nameOrPath) {
+    if (!nameOrPath || nameOrPath.length == 0) return YES;
+    NSString *title = nil;
+    @try { title = ((id (*)(id, SEL))objc_msgSend)(folder, sel_registerName("title")); } @catch (NSException *e) {}
+    if (title && [title isEqualToString:nameOrPath]) return YES;
+    NSString *path = folderPathForFolder(folder);
+    return path && [path isEqualToString:nameOrPath];
+}
+
+static id folderForNameOrPath(id viewContext, NSString *nameOrPath) {
+    NSArray *folders = fetchFolders(viewContext);
+    id match = nil;
+    NSInteger count = 0;
+    for (id folder in folders) {
+        if (folderMatchesNameOrPath(folder, nameOrPath)) { match = folder; count++; }
+    }
+    if (count > 1) errorExit([NSString stringWithFormat:@"Multiple folders match '%@' — use a full folder path", nameOrPath]);
+    return match;
+}
+
 static NSArray *fetchNotes(id viewContext, NSString *folderName, NSUInteger limit) {
     NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
-    NSMutableArray *predicates = [NSMutableArray array];
-    [predicates addObject:activeNotePredicate()];
-    if (folderName) {
-        [predicates addObject:[NSPredicate predicateWithFormat:@"folder.title == %@", folderName]];
-    }
-    request.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:predicates];
+    request.predicate = activeNotePredicate();
     request.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"modificationDate" ascending:NO]];
-    if (limit > 0) request.fetchLimit = limit;
+    if (limit > 0 && !folderName) request.fetchLimit = limit;
     NSError *error = nil;
     NSArray *notes = [viewContext executeFetchRequest:request error:&error];
     if (error) {
         checkNotesAccessError(error);
         errorExit([NSString stringWithFormat:@"Failed to fetch notes: %@", error]);
     }
-    return notes;
+    if (!folderName) return notes;
+    NSMutableArray *filtered = [NSMutableArray array];
+    for (id note in notes) {
+        id folder = nil;
+        @try { folder = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("folder")); } @catch (NSException *e) {}
+        if (folderMatchesNameOrPath(folder, folderName)) {
+            [filtered addObject:note];
+            if (limit > 0 && filtered.count >= limit) break;
+        }
+    }
+    return filtered;
 }
 
 static NSDictionary *noteToDict(id note); // forward declaration
@@ -278,9 +327,6 @@ static NSArray *findNotes(id viewContext, NSString *title, NSString *folderName)
     NSMutableArray *predicates = [NSMutableArray array];
     [predicates addObject:activeNotePredicate()];
     [predicates addObject:[NSPredicate predicateWithFormat:@"title CONTAINS %@", title]];
-    if (folderName) {
-        [predicates addObject:[NSPredicate predicateWithFormat:@"folder.title == %@", folderName]];
-    }
     request.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:predicates];
     NSError *error = nil;
     NSArray *notes = [viewContext executeFetchRequest:request error:&error];
@@ -288,8 +334,14 @@ static NSArray *findNotes(id viewContext, NSString *title, NSString *folderName)
         checkNotesAccessError(error);
         errorExit([NSString stringWithFormat:@"Failed to find notes: %@", error]);
     }
-    if (notes.count == 0) return @[];
-    return notes;
+    if (!folderName || notes.count == 0) return notes ?: @[];
+    NSMutableArray *filtered = [NSMutableArray array];
+    for (id note in notes) {
+        id folder = nil;
+        @try { folder = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("folder")); } @catch (NSException *e) {}
+        if (folderMatchesNameOrPath(folder, folderName)) [filtered addObject:note];
+    }
+    return filtered;
 }
 
 static id findNote(id viewContext, NSString *title, NSString *folderName) {
@@ -419,6 +471,12 @@ static NSDictionary *noteToDict(id note) {
     } @catch (NSException *e) {}
 
     @try {
+        id folder = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("folder"));
+        NSString *path = folderPathForFolder(folder);
+        if (path) dict[@"folderPath"] = path;
+    } @catch (NSException *e) {}
+
+    @try {
         Class ICAppURLUtilities = NSClassFromString(@"ICAppURLUtilities");
         if (ICAppURLUtilities) {
             NSURL *appURL = ((id (*)(id, SEL, id))objc_msgSend)(
@@ -439,7 +497,13 @@ static int cmdFolders(id viewContext) {
     for (id folder in folders) {
         NSString *title = ((id (*)(id, SEL))objc_msgSend)(folder, sel_registerName("title"));
         if (title && title.length > 0) {
-            [result addObject:@{@"name": title}];
+            NSString *path = folderPathForFolder(folder) ?: title;
+            id parent = nil;
+            @try { parent = ((id (*)(id, SEL))objc_msgSend)(folder, sel_registerName("parentFolder")); } @catch (NSException *e) {}
+            NSString *parentPath = parent ? folderPathForFolder(parent) : nil;
+            NSMutableDictionary *entry = [NSMutableDictionary dictionaryWithDictionary:@{@"name": title, @"path": path}];
+            if (parentPath) entry[@"parentPath"] = parentPath;
+            [result addObject:entry];
         }
     }
     printJSON(result);
@@ -450,7 +514,11 @@ static int cmdList(id viewContext, NSString *folderName, NSUInteger limit) {
     NSArray *notes = fetchNotes(viewContext, folderName, limit);
     NSMutableArray *result = [NSMutableArray array];
     for (id note in notes) {
+        id folder = nil;
+        @try { folder = ((id (*)(id, SEL))objc_msgSend)(note, sel_registerName("folder")); } @catch (NSException *e) {}
+        if (!folderMatchesNameOrPath(folder, folderName)) continue;
         [result addObject:noteToDict(note)];
+        if (result.count >= 20) break;
     }
     printJSON(result);
     return 0;
@@ -621,7 +689,8 @@ static int cmdCreateFolder(id viewContext, NSString *name, NSString *parentName)
     [viewContext save:&error];
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 
-    NSMutableDictionary *output = [NSMutableDictionary dictionaryWithDictionary:@{@"name": name, @"created": @YES}];
+    NSString *path = folderPathForFolder(newFolder) ?: name;
+    NSMutableDictionary *output = [NSMutableDictionary dictionaryWithDictionary:@{@"name": name, @"path": path, @"created": @YES}];
     if (parentName) output[@"parent"] = parentName;
     printJSON(output);
     return 0;
@@ -632,7 +701,7 @@ static int cmdDeleteFolder(id viewContext, NSString *name) {
     id targetFolder = nil;
     for (id f in folders) {
         NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
-        if ([fname isEqualToString:name]) { targetFolder = f; break; }
+        if (folderMatchesNameOrPath(f, name)) { targetFolder = f; break; }
     }
     if (!targetFolder) errorExit([NSString stringWithFormat:@"Folder not found: %@", name]);
 
@@ -973,7 +1042,7 @@ static int cmdMoveNote(id viewContext, NSString *identifier, NSString *toFolder)
     NSArray *folders = fetchFolders(viewContext);
     for (id f in folders) {
         NSString *fname = ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("title"));
-        if ([fname isEqualToString:toFolder]) { targetFolder = f; break; }
+        if (folderMatchesNameOrPath(f, toFolder)) { targetFolder = f; break; }
     }
     if (!targetFolder) errorExit([NSString stringWithFormat:@"Folder not found: %@", toFolder]);
 
@@ -991,12 +1060,8 @@ static int cmdSearch(id viewContext, NSString *query, NSString *folderName) {
     NSMutableArray *predicates = [NSMutableArray array];
     [predicates addObject:activeNotePredicate()];
     [predicates addObject:[NSPredicate predicateWithFormat:@"title CONTAINS[cd] %@ OR snippet CONTAINS[cd] %@", query, query]];
-    if (folderName) {
-        [predicates addObject:[NSPredicate predicateWithFormat:@"folder.title == %@", folderName]];
-    }
     request.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:predicates];
     request.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"modificationDate" ascending:NO]];
-    request.fetchLimit = 20;
     NSError *error = nil;
     NSArray *notes = [viewContext executeFetchRequest:request error:&error];
     if (error) {

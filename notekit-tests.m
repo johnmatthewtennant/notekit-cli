@@ -4652,6 +4652,26 @@ static int cmdTest(id viewContext) {
         if (errOk) { fprintf(stderr, "  PASS\n"); passed++; }
         else { fprintf(stderr, "  FAIL (expected exit=1 with 'Parent folder not found')\n"); failed++; }
     }
+    // Regression test for sync-daemon's former unbounded memory growth. This
+    // binary uses manual reference counting, so allocating one formatter per
+    // note/date conversion retained its full ICU object graph forever.
+    fprintf(stderr, "Test: date formatter reuse...\n");
+    {
+        NSISO8601DateFormatter *first = iso8601Formatter();
+        NSISO8601DateFormatter *second = iso8601Formatter();
+        NSDateFormatter *fallbackFirst = fallbackISODateFormatter();
+        NSDateFormatter *fallbackSecond = fallbackISODateFormatter();
+        NSDate *source = [NSDate dateWithTimeIntervalSince1970:1700000000];
+        NSString *encoded = dateToISO(source);
+        NSDate *decoded = dateFromISO(encoded);
+        BOOL ok = first != nil && first == second &&
+                  fallbackFirst != nil && fallbackFirst == fallbackSecond &&
+                  encoded.length > 0 && decoded != nil &&
+                  fabs([decoded timeIntervalSinceDate:source]) < 1.0;
+        if (ok) { fprintf(stderr, "  PASS\n"); passed++; }
+        else { fprintf(stderr, "  FAIL\n"); failed++; }
+    }
+
     // Test: sync with configurable directory and Notes folder
     fprintf(stderr, "Test: sync configurable directory and folder...\n");
     {

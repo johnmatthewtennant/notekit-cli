@@ -267,22 +267,35 @@ static id makeParagraphStyle(NSInteger style) {
     return paraStyle;
 }
 
+// notekit is compiled without ARC. Reuse the expensive formatters rather than
+// leaking a retained formatter (and its ICU allocations) on every conversion.
+// This matters for sync-daemon, which converts dates for every fetched note on
+// every pass and otherwise grows by hundreds of megabytes per minute.
+static NSISO8601DateFormatter *iso8601Formatter(void) {
+    static NSISO8601DateFormatter *formatter = nil;
+    if (!formatter) formatter = [[NSISO8601DateFormatter alloc] init];
+    return formatter;
+}
+
+static NSDateFormatter *fallbackISODateFormatter(void) {
+    static NSDateFormatter *formatter = nil;
+    if (!formatter) {
+        formatter = [[NSDateFormatter alloc] init];
+        formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        formatter.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss'Z'";
+        formatter.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+    }
+    return formatter;
+}
+
 static NSString *dateToISO(NSDate *date) {
-    if (!date) return nil;
-    NSISO8601DateFormatter *fmt = [[NSISO8601DateFormatter alloc] init];
-    return [fmt stringFromDate:date];
+    return date ? [iso8601Formatter() stringFromDate:date] : nil;
 }
 
 static NSDate *dateFromISO(NSString *iso) {
     if (!iso || iso.length == 0) return nil;
-    NSISO8601DateFormatter *fmt = [[NSISO8601DateFormatter alloc] init];
-    NSDate *date = [fmt dateFromString:iso];
-    if (date) return date;
-    NSDateFormatter *fallback = [[NSDateFormatter alloc] init];
-    fallback.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
-    fallback.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss'Z'";
-    fallback.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
-    return [fallback dateFromString:iso];
+    NSDate *date = [iso8601Formatter() dateFromString:iso];
+    return date ?: [fallbackISODateFormatter() dateFromString:iso];
 }
 
 static void printJSON(id obj) {
@@ -290,7 +303,8 @@ static void printJSON(id obj) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:obj
         options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:&error];
     if (error) errorExit([error localizedDescription]);
-    printf("%s\\n", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String);
+    NSString *json = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+    printf("%s\\n", json.UTF8String);
 }'''
 
 

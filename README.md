@@ -37,7 +37,7 @@ Primitive commands give you full control. Convenience commands compose multiple 
 Primitives:
   notekit folders
   notekit list [--folder <name>] [--limit <n>]
-  notekit get (--title <title> | --id <id>) [--folder <name>]
+  notekit get (--title <title> | --id <id>) [--folder <name>] [--exact]
   notekit read (--title <title> | --id <id>) [--folder <name>]
   notekit read-attrs (--title <title> | --id <id>) [--folder <name>]
   notekit create-empty --folder <name>
@@ -78,7 +78,7 @@ Convenience (composed from primitives):
 `write-markdown` recognizes this syntax and converts them back to native Apple Notes inline link attachments. To get a note's ID for linking:
 
 ```bash
-notekit get --title "Target Note" | jq -r .id
+notekit get --title "Target Note" --exact | jq -r .id
 ```
 
 ## Inline color

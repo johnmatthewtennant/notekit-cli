@@ -2674,7 +2674,7 @@ static void usage(void) {
     fprintf(stderr, "Note-to-note links:\n");
     fprintf(stderr, "  read-markdown outputs note links as:  [Display Text](applenotes://showNote?identifier=NOTE_ID)\n");
     fprintf(stderr, "  write-markdown accepts the same syntax and converts them back to native note links.\n");
-    fprintf(stderr, "  To get a note's ID for linking, use:  notekit get --title \"Target Note\" | jq -r .id\n");
+    fprintf(stderr, "  To get a note's ID for linking, use:  notekit get --title \"Target Note\" --exact | jq -r .id\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Reading and writing notes (recommended):\n");
     fprintf(stderr, "  notekit read-markdown (--title <title> | --id <id>) [--folder <name>]\n");
@@ -2686,7 +2686,8 @@ static void usage(void) {
     fprintf(stderr, "Browsing and organizing:\n");
     fprintf(stderr, "  notekit folders\n");
     fprintf(stderr, "  notekit list [--folder <name>] [--limit <n>]\n");
-    fprintf(stderr, "  notekit get (--title <title> | --id <id>) [--folder <name>]\n");
+    fprintf(stderr, "  notekit get (--title <title> | --id <id>) [--folder <name>] [--exact]\n");
+    fprintf(stderr, "      --title is a substring match by default. --exact requires exactly one exact title match.\n");
     fprintf(stderr, "  notekit search --query <query> [--folder <name>]\n");
     fprintf(stderr, "  notekit delete --id <id>\n");
     fprintf(stderr, "  notekit move --id <id> --to <to-folder>\n");

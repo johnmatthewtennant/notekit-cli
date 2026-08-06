@@ -46,6 +46,7 @@ int main(int argc, const char *argv[]) {
                     [flag isEqualToString:@"backup"] ||
                     [flag isEqualToString:@"diff"] ||
                     [flag isEqualToString:@"allow-empty"] ||
+                    [flag isEqualToString:@"exact"] ||
                     [flag isEqualToString:@"case-insensitive"] ||
                     [flag isEqualToString:@"preserve-round-trip"]) {
                     opts[flag] = @"true";
@@ -132,7 +133,7 @@ int main(int argc, const char *argv[]) {
                 if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", noteID]);
                 return cmdGetNote(note);
             }
-            return cmdGet(viewContext, kwTitle, folderName);
+            return cmdGet(viewContext, kwTitle, folderName, [opts[@"exact"] isEqualToString:@"true"]);
 
         } else if ([command isEqualToString:@"read"]) {
             NSString *noteID = opts[@"id"];

@@ -3843,6 +3843,26 @@ static int cmdTest(id viewContext) {
         }
     }
 
+    fprintf(stderr, "Test: get --title --exact returns one exact match...\n");
+    {
+        NSString *cmd = [NSString stringWithFormat:@"'%s' get --title '%@' --folder '%@' --exact 2>/dev/null",
+            exePath, testTitle, testFolderName];
+        FILE *fp = popen([cmd UTF8String], "r");
+        NSMutableData *outData = [NSMutableData data];
+        if (fp) {
+            char buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) [outData appendBytes:buf length:n];
+            pclose(fp);
+        }
+        id parsed = [NSJSONSerialization JSONObjectWithData:outData options:0 error:nil];
+        if ([parsed isKindOfClass:[NSDictionary class]] && [parsed[@"title"] isEqualToString:testTitle]) {
+            fprintf(stderr, "  PASS\n"); passed++;
+        } else {
+            fprintf(stderr, "  FAIL (expected exact title object, got %s)\n", [[parsed description] UTF8String]); failed++;
+        }
+    }
+
     // Test: read --title errors on ambiguous match
     fprintf(stderr, "Test: read --title ambiguous match error...\n");
     {

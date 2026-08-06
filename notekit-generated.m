@@ -292,6 +292,24 @@ static NSArray *findNotes(id viewContext, NSString *title, NSString *folderName)
     return notes;
 }
 
+static NSArray *findNotesExact(id viewContext, NSString *title, NSString *folderName) {
+    NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
+    NSMutableArray *predicates = [NSMutableArray array];
+    [predicates addObject:activeNotePredicate()];
+    [predicates addObject:[NSPredicate predicateWithFormat:@"title == %@", title]];
+    if (folderName) {
+        [predicates addObject:[NSPredicate predicateWithFormat:@"folder.title == %@", folderName]];
+    }
+    request.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:predicates];
+    NSError *error = nil;
+    NSArray *notes = [viewContext executeFetchRequest:request error:&error];
+    if (error) {
+        checkNotesAccessError(error);
+        errorExit([NSString stringWithFormat:@"Failed to find notes: %@", error]);
+    }
+    return notes;
+}
+
 static id findNote(id viewContext, NSString *title, NSString *folderName) {
     NSArray *notes = findNotes(viewContext, title, folderName);
     if (notes.count == 0) return nil;
@@ -461,9 +479,18 @@ static int cmdGetNote(id note) {
     return 0;
 }
 
-static int cmdGet(id viewContext, NSString *title, NSString *folderName) {
-    NSArray *notes = findNotes(viewContext, title, folderName);
+static int cmdGet(id viewContext, NSString *title, NSString *folderName, BOOL exact) {
+    NSArray *notes = exact ? findNotesExact(viewContext, title, folderName) : findNotes(viewContext, title, folderName);
     if (notes.count == 0) errorExit([NSString stringWithFormat:@"Note not found: %@", title]);
+    if (exact && notes.count > 1) {
+        NSMutableString *msg = [NSMutableString stringWithFormat:
+            @"Multiple notes have the exact title \"%@\". Use --id to specify:\n", title];
+        for (id note in notes) {
+            NSDictionary *d = noteToDict(note);
+            [msg appendFormat:@"  %@  %@\n", d[@"id"], d[@"title"]];
+        }
+        errorExit(msg);
+    }
     if (notes.count == 1) return cmdGetNote(notes[0]);
     NSMutableArray *results = [NSMutableArray array];
     for (id note in notes) {

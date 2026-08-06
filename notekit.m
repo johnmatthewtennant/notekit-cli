@@ -45,6 +45,7 @@ int main(int argc, const char *argv[]) {
                     [flag isEqualToString:@"dry-run"] ||
                     [flag isEqualToString:@"backup"] ||
                     [flag isEqualToString:@"diff"] ||
+                    [flag isEqualToString:@"allow-empty"] ||
                     [flag isEqualToString:@"case-insensitive"] ||
                     [flag isEqualToString:@"preserve-round-trip"]) {
                     opts[flag] = @"true";
@@ -182,7 +183,8 @@ int main(int argc, const char *argv[]) {
             BOOL dryRun = [opts[@"dry-run"] isEqualToString:@"true"];
             BOOL backupFlag = [opts[@"backup"] isEqualToString:@"true"];
             BOOL diffMode = [opts[@"diff"] isEqualToString:@"true"];
-            return cmdWriteMarkdownNote(note, viewContext, dryRun, backupFlag, diffMode);
+            BOOL allowEmpty = [opts[@"allow-empty"] isEqualToString:@"true"];
+            return cmdWriteMarkdownNote(note, viewContext, dryRun, backupFlag, diffMode, allowEmpty);
 
         } else if ([command isEqualToString:@"set-attr"]) {
             NSString *noteID = opts[@"id"];

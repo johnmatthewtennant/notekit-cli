@@ -2311,6 +2311,12 @@ static NSString *stableSkillSourcePath(NSString *path) {
     return path;
 }
 
+static void addUniqueSkillTarget(NSMutableArray *targetDirs, NSString *path) {
+    NSString *parent = [[path stringByDeletingLastPathComponent] stringByResolvingSymlinksInPath];
+    NSString *resolvedPath = [parent stringByAppendingPathComponent:[path lastPathComponent]];
+    if (![targetDirs containsObject:resolvedPath]) [targetDirs addObject:resolvedPath];
+}
+
 static int cmdInstallSkill(BOOL installClaude, BOOL installAgents, BOOL force) {
     // Get path of currently running binary
     char execPath[PATH_MAX];
@@ -2366,8 +2372,8 @@ static int cmdInstallSkill(BOOL installClaude, BOOL installAgents, BOOL force) {
     // Install to selected skill directories
     NSString *home = NSHomeDirectory();
     NSMutableArray *targetDirs = [NSMutableArray array];
-    if (installClaude) [targetDirs addObject:[home stringByAppendingPathComponent:@".claude/skills/apple-notes"]];
-    if (installAgents) [targetDirs addObject:[home stringByAppendingPathComponent:@".agents/skills/apple-notes"]];
+    if (installClaude) addUniqueSkillTarget(targetDirs, [home stringByAppendingPathComponent:@".claude/skills/apple-notes"]);
+    if (installAgents) addUniqueSkillTarget(targetDirs, [home stringByAppendingPathComponent:@".agents/skills/apple-notes"]);
 
     NSError *error = nil;
     int failures = 0;

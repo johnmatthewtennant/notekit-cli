@@ -88,8 +88,8 @@ notekit get --title "Target Note" | jq -r .id
 `sync` reconciles markdown files with an Apple Notes folder once, and `sync-daemon` runs the same pass repeatedly. Defaults are set for agent notes:
 
 ```bash
-notekit sync --dir ~/agent-documents/agent-notes --folder agent-notes
-notekit sync-daemon --dir ~/agent-documents/agent-notes --folder agent-notes --interval 5
+notekit sync --dir ~/Development/agent-documents/agent-notes --folder agent-notes
+notekit sync-daemon --dir ~/Development/agent-documents/agent-notes --folder agent-notes --interval 5
 ```
 
 Files are markdown with YAML frontmatter and a `.notekit-sync.json` state file in the sync directory. Deletions are non-destructive by default: if one side is missing, the remaining side is preserved on the next pass. If both sides changed since the last sync, the Apple Notes version wins and notekit writes the local disk version to a `.local-conflict-<timestamp>.md` file.

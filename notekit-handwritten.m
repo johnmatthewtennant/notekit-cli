@@ -2702,7 +2702,7 @@ static int cmdImport(id viewContext, NSString *inputPath, NSString *rootFolder, 
 // --- Two-way sync ---
 
 static NSString *syncDefaultDir(void) {
-    return [@"~/agent-documents/agent-notes" stringByExpandingTildeInPath];
+    return [@"~/Development/agent-documents/agent-notes" stringByExpandingTildeInPath];
 }
 
 static NSString *syncDefaultStatePath(NSString *dir) {
@@ -3328,7 +3328,7 @@ static void usage(void) {
     fprintf(stderr, "Two-way sync:\n");
     fprintf(stderr, "  notekit sync [--dir <dir>] [--folder <name>] [--state <path>] [--dry-run]\n");
     fprintf(stderr, "  notekit sync-daemon [--dir <dir>] [--folder <name>] [--state <path>] [--interval <seconds>] [--dry-run]\n");
-    fprintf(stderr, "      Defaults: --dir ~/agent-documents/agent-notes --folder agent-notes\n");
+    fprintf(stderr, "      Defaults: --dir ~/Development/agent-documents/agent-notes --folder agent-notes\n");
     fprintf(stderr, "      Sync stores metadata in .notekit-sync.json and YAML frontmatter.\n");
     fprintf(stderr, "      Deletions are non-destructive by default; Notes wins conflicts and local copies are preserved.\n");
     fprintf(stderr, "\n");

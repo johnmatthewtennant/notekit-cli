@@ -45,6 +45,8 @@ int main(int argc, const char *argv[]) {
                     [flag isEqualToString:@"dry-run"] ||
                     [flag isEqualToString:@"backup"] ||
                     [flag isEqualToString:@"diff"] ||
+                    [flag isEqualToString:@"allow-empty"] ||
+                    [flag isEqualToString:@"exact"] ||
                     [flag isEqualToString:@"case-insensitive"] ||
                     [flag isEqualToString:@"preserve-round-trip"] ||
                     [flag isEqualToString:@"metadata-json"] ||
@@ -133,7 +135,7 @@ int main(int argc, const char *argv[]) {
                 if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", noteID]);
                 return cmdGetNote(note);
             }
-            return cmdGet(viewContext, kwTitle, folderName);
+            return cmdGet(viewContext, kwTitle, folderName, [opts[@"exact"] isEqualToString:@"true"]);
 
         } else if ([command isEqualToString:@"read"]) {
             NSString *noteID = opts[@"id"];
@@ -184,7 +186,8 @@ int main(int argc, const char *argv[]) {
             BOOL dryRun = [opts[@"dry-run"] isEqualToString:@"true"];
             BOOL backupFlag = [opts[@"backup"] isEqualToString:@"true"];
             BOOL diffMode = [opts[@"diff"] isEqualToString:@"true"];
-            return cmdWriteMarkdownNote(note, viewContext, dryRun, backupFlag, diffMode);
+            BOOL allowEmpty = [opts[@"allow-empty"] isEqualToString:@"true"];
+            return cmdWriteMarkdownNote(note, viewContext, dryRun, backupFlag, diffMode, allowEmpty);
 
         } else if ([command isEqualToString:@"set-attr"]) {
             NSString *noteID = opts[@"id"];

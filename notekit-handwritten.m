@@ -2068,6 +2068,7 @@ static int cmdWriteMarkdownDiff(id note, id viewContext, NSString *identifier,
     }];
 
     NSInteger cumulativeDelta = 0;
+    BOOL mutationFailed = NO;
     for (NSDictionary *op in ops) {
         NSString *opType = op[@"op"];
         NSUInteger pos = [op[@"pos"] unsignedIntegerValue];
@@ -2078,9 +2079,10 @@ static int cmdWriteMarkdownDiff(id note, id viewContext, NSString *identifier,
             NSUInteger deleteLen = [op[@"len"] unsignedIntegerValue];
             NSUInteger currentMsLenForDelete = (NSUInteger)((NSInteger)msLen + cumulativeDelta);
             if (pos + deleteLen > currentMsLenForDelete) {
-                fprintf(stderr, "warning: skipping delete mutation at pos %lu len %lu (exceeds string length %lu)\n",
+                fprintf(stderr, "error: cannot apply delete mutation at pos %lu len %lu (exceeds string length %lu)\n",
                     (unsigned long)pos, (unsigned long)deleteLen, (unsigned long)currentMsLenForDelete);
-                continue;
+                mutationFailed = YES;
+                break;
             }
             ((void (*)(id, SEL, NSRange))objc_msgSend)(ms, sel_registerName("deleteCharactersInRange:"),
                 NSMakeRange(pos, deleteLen));
@@ -2185,9 +2187,17 @@ static int cmdWriteMarkdownDiff(id note, id viewContext, NSString *identifier,
         }
 
         } @catch (NSException *mutationEx) {
-            fprintf(stderr, "warning: skipping mutation op '%s' at pos %lu due to exception: %s\n",
+            fprintf(stderr, "error: cannot apply mutation op '%s' at pos %lu: %s\n",
                 [opType UTF8String], (unsigned long)pos, [[mutationEx description] UTF8String]);
+            mutationFailed = YES;
+            break;
         }
+    }
+
+    if (mutationFailed) {
+        ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("endEditing"));
+        fprintf(stderr, "error: write-markdown aborted; note was not saved\n");
+        return 1;
     }
 
     // Save
@@ -2219,12 +2229,15 @@ static int cmdWriteMarkdownWithString(id note, id viewContext, NSString *markdow
     }
 }
 
-static int cmdWriteMarkdownNote(id note, id viewContext, BOOL dryRun, BOOL backup, BOOL diffMode) {
+static int cmdWriteMarkdownNote(id note, id viewContext, BOOL dryRun, BOOL backup, BOOL diffMode, BOOL allowEmpty) {
     // Read markdown from stdin
     NSFileHandle *input = [NSFileHandle fileHandleWithStandardInput];
     NSData *data = [input readDataToEndOfFile];
     NSString *markdown = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     if (!markdown) errorExit(@"Failed to read markdown from stdin (invalid UTF-8)");
+    if (markdown.length == 0 && !allowEmpty) {
+        errorExit(@"Refusing empty markdown input. Pass --allow-empty to clear a note intentionally.");
+    }
     return cmdWriteMarkdownWithString(note, viewContext, markdown, dryRun, backup, diffMode);
 }
 
@@ -2297,6 +2310,12 @@ static NSString *stableSkillSourcePath(NSString *path) {
     return path;
 }
 
+static void addUniqueSkillTarget(NSMutableArray *targetDirs, NSString *path) {
+    NSString *parent = [[path stringByDeletingLastPathComponent] stringByResolvingSymlinksInPath];
+    NSString *resolvedPath = [parent stringByAppendingPathComponent:[path lastPathComponent]];
+    if (![targetDirs containsObject:resolvedPath]) [targetDirs addObject:resolvedPath];
+}
+
 static int cmdInstallSkill(BOOL installClaude, BOOL installAgents, BOOL force) {
     // Get path of currently running binary
     char execPath[PATH_MAX];
@@ -2352,8 +2371,8 @@ static int cmdInstallSkill(BOOL installClaude, BOOL installAgents, BOOL force) {
     // Install to selected skill directories
     NSString *home = NSHomeDirectory();
     NSMutableArray *targetDirs = [NSMutableArray array];
-    if (installClaude) [targetDirs addObject:[home stringByAppendingPathComponent:@".claude/skills/apple-notes"]];
-    if (installAgents) [targetDirs addObject:[home stringByAppendingPathComponent:@".agents/skills/apple-notes"]];
+    if (installClaude) addUniqueSkillTarget(targetDirs, [home stringByAppendingPathComponent:@".claude/skills/apple-notes"]);
+    if (installAgents) addUniqueSkillTarget(targetDirs, [home stringByAppendingPathComponent:@".agents/skills/apple-notes"]);
 
     NSError *error = nil;
     int failures = 0;
@@ -3289,18 +3308,20 @@ static void usage(void) {
     fprintf(stderr, "Note-to-note links:\n");
     fprintf(stderr, "  read-markdown outputs note links as:  [Display Text](applenotes://showNote?identifier=NOTE_ID)\n");
     fprintf(stderr, "  write-markdown accepts the same syntax and converts them back to native note links.\n");
-    fprintf(stderr, "  To get a note's ID for linking, use:  notekit get --title \"Target Note\" | jq -r .id\n");
+    fprintf(stderr, "  To get a note's ID for linking, use:  notekit get --title \"Target Note\" --exact | jq -r .id\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Reading and writing notes (recommended):\n");
     fprintf(stderr, "  notekit read-markdown (--title <title> | --id <id>) [--folder <name>]\n");
-    fprintf(stderr, "  notekit write-markdown --id <id> [--dry-run] [--backup] [--diff]    Read markdown from stdin, replace note content\n");
+    fprintf(stderr, "  notekit write-markdown --id <id> [--dry-run] [--backup] [--diff] [--allow-empty]\n");
+    fprintf(stderr, "      Read markdown from stdin and replace note content. Empty input is refused unless --allow-empty is set.\n");
     fprintf(stderr, "  notekit create-markdown --folder <name> --title <title> [--diff]    Create note from stdin markdown, output id/title/url\n");
     fprintf(stderr, "  notekit create --folder <name> --title <title> [--body <text>] [--style <n>]\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Browsing and organizing:\n");
     fprintf(stderr, "  notekit folders\n");
     fprintf(stderr, "  notekit list [--folder <name>] [--limit <n>]\n");
-    fprintf(stderr, "  notekit get (--title <title> | --id <id>) [--folder <name>]\n");
+    fprintf(stderr, "  notekit get (--title <title> | --id <id>) [--folder <name>] [--exact]\n");
+    fprintf(stderr, "      --title is a substring match by default. --exact requires exactly one exact title match.\n");
     fprintf(stderr, "  notekit search --query <query> [--folder <name>]\n");
     fprintf(stderr, "  notekit delete --id <id>\n");
     fprintf(stderr, "  notekit move --id <id> --to <to-folder>\n");

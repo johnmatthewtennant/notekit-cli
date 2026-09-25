@@ -14,13 +14,17 @@ else
   brew install "$FORMULA"
 fi
 
-# Install Claude Code skill
-echo "Installing Claude Code skill..."
-mkdir -p ~/.agents/skills/"$SKILL"
+# Install agent skill
+echo "Installing skill..."
+AGENTS_SKILLS="$HOME/.agents/skills"
+CLAUDE_SKILLS="$HOME/.claude/skills"
+mkdir -p "$AGENTS_SKILLS/$SKILL"
 curl -sL "https://raw.githubusercontent.com/$REPO/master/.agents/skills/$SKILL/SKILL.md" \
-  -o ~/.agents/skills/"$SKILL"/SKILL.md
-mkdir -p ~/.claude/skills
-ln -sfn ~/.agents/skills/"$SKILL" ~/.claude/skills/"$SKILL"
+  -o "$AGENTS_SKILLS/$SKILL/SKILL.md"
+mkdir -p "$CLAUDE_SKILLS"
+if [[ "$(cd -P "$AGENTS_SKILLS" && pwd)" != "$(cd -P "$CLAUDE_SKILLS" && pwd)" ]]; then
+  ln -sfn "$AGENTS_SKILLS/$SKILL" "$CLAUDE_SKILLS/$SKILL"
+fi
 
 echo ""
 echo "Done! Use /apple-notes in Claude Code."

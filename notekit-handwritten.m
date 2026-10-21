@@ -15,7 +15,7 @@ static id createEmptyNoteInFolder(id viewContext, NSString *folderName) {
 
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("saveNoteData"));
     NSError *error = nil;
-    [viewContext save:&error];
+    saveNotesContext(viewContext, &error);
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
     return note;
 }
@@ -57,7 +57,7 @@ static int cmdDelete(id viewContext, NSString *identifier) {
     [viewContext deleteObject:note];
 
     NSError *error = nil;
-    [viewContext save:&error];
+    saveNotesContext(viewContext, &error);
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 
     printJSON(@{@"id": identifier, @"deleted": @YES});
@@ -72,10 +72,82 @@ static void saveNote(id note, id viewContext, NSUInteger newLength, NSInteger de
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("endEditing"));
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("saveNoteData"));
     NSError *error = nil;
-    [viewContext save:&error];
+    saveNotesContext(viewContext, &error);
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 }
 
+
+// Native media import keeps Notes responsible for media files and metadata.
+static int cmdInsertImage(id viewContext, NSString *identifier, NSString *file,
+                          NSInteger position, BOOL bodyRelative) {
+    id note = findNoteByID(viewContext, identifier);
+    if (!note) errorExit(@"Note not found");
+    SEL import = sel_registerName("addAttachmentWithFileURL:");
+    if (![note respondsToSelector:import] || !ICTTAttachmentClass ||
+        ![note respondsToSelector:sel_registerName("setShouldAddMediaAsynchronously:")])
+        errorExit(@"Native image import is unavailable on this macOS version");
+    if (((BOOL (*)(id, SEL))objc_msgSend)(note, sel_registerName("isPasswordProtected"))) errorExit(@"Image insertion into password-protected notes is not supported");
+    NSURL *url = [NSURL fileURLWithPath:[file stringByExpandingTildeInPath]];
+    NSData *data = [NSData dataWithContentsOfURL:url];
+    if (!data) errorExit(@"Cannot read image file");
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+    NSString *uti = source ? (__bridge NSString *)CGImageSourceGetType(source) : nil;
+    BOOL supported = [uti isEqualToString:@"public.png"] || [uti isEqualToString:@"public.jpeg"];
+    CGImageRef image = supported ? CGImageSourceCreateImageAtIndex(source, 0, NULL) : NULL;
+    if (source) CFRelease(source);
+    if (!image) errorExit(@"--file must contain a valid PNG or JPEG image");
+    CGImageRelease(image);
+    id doc = [note valueForKey:@"document"];
+    id ms = [doc valueForKey:@"mergeableString"];
+    NSUInteger oldLength = ((NSUInteger (*)(id, SEL))objc_msgSend)(ms, sel_registerName("length"));
+    NSUInteger offset = bodyRelative ? bodyOffsetForNote(note) : 0;
+    if (offset == NSNotFound) errorExit(@"Note has no body for --body-offset");
+    NSUInteger insertPosition = position < 0 ? oldLength : (NSUInteger)position;
+    if (position >= 0) {
+        if (offset > oldLength || insertPosition > oldLength - offset) errorExit(@"Position exceeds note length");
+        insertPosition += offset;
+    }
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(note, sel_registerName("setShouldAddMediaAsynchronously:"), NO);
+    id attachment = ((id (*)(id, SEL, id))objc_msgSend)(note, import, url);
+    if (!attachment || ![attachment valueForKey:@"media"]) {
+        [viewContext rollback];
+        errorExit(@"Notes failed to import the image");
+    }
+    NSString *attachmentID = [[[attachment valueForKey:@"identifier"] copy] autorelease];
+    id tt = [[ICTTAttachmentClass alloc] init];
+    [tt setValue:attachmentID forKey:@"attachmentIdentifier"];
+    [tt setValue:[attachment valueForKey:@"typeUTI"] forKey:@"attachmentUTI"];
+    ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("beginEditing"));
+    ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(ms, sel_registerName("insertString:atIndex:"), @"\uFFFC", insertPosition);
+    id style = [[ICTTParagraphStyleClass alloc] init];
+    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(style, sel_registerName("setStyle:"), 3);
+    ((void (*)(id, SEL, id, NSRange))objc_msgSend)(ms, sel_registerName("setAttributes:range:"),
+        @{@"TTStyle": style, @"NSAttachment": tt}, NSMakeRange(insertPosition, 1));
+    saveNote(note, viewContext, oldLength + 1, 1);
+    printJSON(@{@"id": identifier, @"attachmentId": attachmentID, @"position": @(insertPosition)});
+    return 0;
+}
+
+static int cmdDeleteAttachment(id viewContext, NSString *identifier, NSString *attachmentID) {
+    id note = findNoteByID(viewContext, identifier);
+    if (!note) errorExit(@"Note not found");
+    id attachment = ((id (*)(id, SEL, id))objc_msgSend)(note, sel_registerName("attachmentWithIdentifier:"), attachmentID);
+    if (!attachment || ![[note valueForKey:@"attachments"] containsObject:attachment])
+        errorExit(@"Attachment does not belong to this note");
+    if (((BOOL (*)(id, SEL))objc_msgSend)(note, sel_registerName("isPasswordProtected"))) errorExit(@"Deleting attachments from password-protected notes is not supported");
+    NSRange range = ((NSRange (*)(id, SEL, id))objc_msgSend)(note, sel_registerName("rangeForAttachment:"), attachment);
+    id ms = [[note valueForKey:@"document"] valueForKey:@"mergeableString"];
+    NSUInteger length = ((NSUInteger (*)(id, SEL))objc_msgSend)(ms, sel_registerName("length"));
+    if (range.location == NSNotFound || range.length != 1 || range.location >= length)
+        errorExit(@"Attachment has no single text position in this note");
+    ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("beginEditing"));
+    ((void (*)(id, SEL, NSRange))objc_msgSend)(ms, sel_registerName("deleteCharactersInRange:"), range);
+    // Soft-delete through Notes so cloud tombstones and media cleanup are retained.
+    ((void (*)(id, SEL))objc_msgSend)(attachment, sel_registerName("markForDeletion"));
+    saveNote(note, viewContext, length - 1, -1);
+    printJSON(@{@"id": identifier, @"attachmentId": attachmentID, @"position": @(range.location), @"deleted": @YES});
+    return 0;
+}
 
 static int cmdCreate(id viewContext, NSString *folderName, NSString *title, NSString *body, NSInteger styleValue) {
     id targetFolder = nil;
@@ -428,6 +500,7 @@ static void emitParagraph(NSMutableArray *paragraphs, NSString *text, NSArray *r
             adjRun[@"start"] = @(adjStart);
             adjRun[@"length"] = @(adjLen);
             if (run[@"link"]) adjRun[@"link"] = run[@"link"];
+            if (run[@"attachmentId"]) adjRun[@"attachmentId"] = run[@"attachmentId"];
             if (run[@"noteLinkDisplayText"]) adjRun[@"noteLinkDisplayText"] = run[@"noteLinkDisplayText"];
             if ([run[@"strikethrough"] boolValue]) adjRun[@"strikethrough"] = @YES;
             if ([run[@"bold"] boolValue]) adjRun[@"bold"] = @YES;
@@ -563,6 +636,12 @@ static NSArray *noteToParaModel(id note) {
                         run[@"link"] = noteLink[@"url"];
                         run[@"noteLinkDisplayText"] = noteLink[@"displayText"];
                     }
+                }
+                if (nsAttachment && !run[@"noteLinkDisplayText"] && [sliceText isEqualToString:@"\uFFFC"]) {
+                    NSString *attachmentID = [nsAttachment valueForKey:@"attachmentIdentifier"];
+                    id attachment = ((id (*)(id, SEL, id))objc_msgSend)(note, sel_registerName("attachmentWithIdentifier:"), attachmentID);
+                    if (attachment && ![[attachment valueForKey:@"markedForDeletion"] boolValue])
+                        run[@"attachmentId"] = attachmentID;
                 }
                 id strikethrough = attrs[@"TTStrikethrough"];
                 if (strikethrough) run[@"strikethrough"] = @YES;
@@ -757,6 +836,9 @@ static NSString *paraModelToMarkdown(NSArray *paragraphs, BOOL blankLineSeparato
                 // Restore <br> from placeholder (after escaping so < isn't escaped)
                 escaped = [escaped stringByReplacingOccurrencesOfString:@"\x01BR\x01" withString:@"<br>"];
 
+                if (run[@"attachmentId"]) {
+                    escaped = [NSString stringWithFormat:@"![image](notekit-attachment:%@)", run[@"attachmentId"]];
+                }
                 // Apply link wrapping
                 if (run[@"link"]) {
                     NSString *linkURL = run[@"link"];
@@ -1030,6 +1112,26 @@ static void parseInlineFormatting(NSString *lineText, NSMutableString *outPlainT
                 }
                 i = closeRange.location + 2;
                 continue;
+            }
+        }
+
+        // Stable references to existing native media, never arbitrary file imports.
+        if (c == '!' && i + 1 < len && [lineText characterAtIndex:i + 1] == '[') {
+            NSRange bracket = [lineText rangeOfString:@"](notekit-attachment:" options:0 range:NSMakeRange(i + 2, len - i - 2)];
+            if (bracket.location != NSNotFound) {
+                NSUInteger startID = NSMaxRange(bracket);
+                NSRange close = [lineText rangeOfString:@")" options:0 range:NSMakeRange(startID, len - startID)];
+                if (close.location != NSNotFound) {
+                    NSString *attachmentID = [lineText substringWithRange:NSMakeRange(startID, close.location - startID)];
+                    NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:attachmentID];
+                    if (uuid) {
+                        NSUInteger offset = outPlainText.length;
+                        [outPlainText appendString:@"\uFFFC"];
+                        [outRuns addObject:[@{@"start": @(offset), @"length": @1, @"attachmentId": attachmentID} mutableCopy]];
+                        i = NSMaxRange(close);
+                        continue;
+                    }
+                }
             }
         }
 
@@ -1449,6 +1551,8 @@ static BOOL inlineRunsEqual(NSArray *a, NSArray *b) {
         if (![ra[@"length"] isEqual:rb[@"length"]]) return NO;
         if (![ra[@"link"] isEqual:rb[@"link"]] &&
             !(ra[@"link"] == nil && rb[@"link"] == nil)) return NO;
+        if (![ra[@"attachmentId"] isEqual:rb[@"attachmentId"]] &&
+            !(ra[@"attachmentId"] == nil && rb[@"attachmentId"] == nil)) return NO;
         if ([ra[@"strikethrough"] boolValue] != [rb[@"strikethrough"] boolValue]) return NO;
         if ([ra[@"bold"] boolValue] != [rb[@"bold"] boolValue]) return NO;
         if ([ra[@"italic"] boolValue] != [rb[@"italic"] boolValue]) return NO;
@@ -1535,6 +1639,15 @@ static NSInteger applyInlineRuns(id ms, id note, id viewContext, NSDictionary *n
         if (runStart + runLen > (NSUInteger)((NSInteger)textLen + runDelta)) continue;
 
         NSMutableDictionary *runAttrs = [baseAttrs mutableCopy];
+        // Never inherit a neighboring attachment onto ordinary text.
+        [runAttrs removeObjectForKey:@"NSAttachment"];
+        if (run[@"attachmentId"]) {
+            id attachment = ((id (*)(id, SEL, id))objc_msgSend)(note, sel_registerName("attachmentWithIdentifier:"), run[@"attachmentId"]);
+            id tt = [[ICTTAttachmentClass alloc] init];
+            [tt setValue:run[@"attachmentId"] forKey:@"attachmentIdentifier"];
+            [tt setValue:[attachment valueForKey:@"typeUTI"] forKey:@"attachmentUTI"];
+            runAttrs[@"NSAttachment"] = tt;
+        }
         if (run[@"link"]) {
             NSURL *rawURL = [NSURL URLWithString:run[@"link"]];
             if (rawURL && [[rawURL scheme] isEqualToString:@"applenotes"]) {
@@ -1674,14 +1787,33 @@ static void applyColorRunsFromModel(id note, id viewContext, NSArray *model) {
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("endEditing"));
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("saveNoteData"));
     NSError *error = nil;
-    [viewContext save:&error];
+    saveNotesContext(viewContext, &error);
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
+}
+
+// Resolve all references before editing; unknown/cross-note references must not
+// leave a partially rewritten note or create dangling attachment markers.
+static void validateAttachmentReferences(id note, NSArray *model) {
+    NSMutableSet *seen = [NSMutableSet set];
+    for (NSDictionary *paragraph in model) {
+        for (NSDictionary *run in paragraph[@"runs"]) {
+            NSString *identifier = run[@"attachmentId"];
+            if (!identifier) continue;
+            id attachment = ((id (*)(id, SEL, id))objc_msgSend)(note, sel_registerName("attachmentWithIdentifier:"), identifier);
+            if (!attachment || [[attachment valueForKey:@"markedForDeletion"] boolValue] ||
+                ![[note valueForKey:@"attachments"] containsObject:attachment])
+                errorExit([NSString stringWithFormat:@"Attachment does not belong to this note: %@", identifier]);
+            if ([seen containsObject:identifier]) errorExit(@"An attachment reference may appear only once");
+            [seen addObject:identifier];
+        }
+    }
 }
 
 // Full-replace write: clear note content and rewrite from scratch.
 // This avoids diff algorithm issues that cause corruption on repeated writes.
 static int cmdWriteMarkdownFullReplace(id note, id viewContext, NSString *identifier,
                                         NSArray *newModel, BOOL dryRun, BOOL backup) {
+    validateAttachmentReferences(note, newModel);
     // For dry-run, compute a diff summary to show what would change
     if (dryRun) {
         NSArray *oldModel = noteToParaModel(note);
@@ -1838,7 +1970,7 @@ static int cmdWriteMarkdownFullReplace(id note, id viewContext, NSString *identi
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("endEditing"));
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("saveNoteData"));
     NSError *error = nil;
-    [viewContext save:&error];
+    saveNotesContext(viewContext, &error);
     if (error) {
         errorExit([NSString stringWithFormat:@"Save error: %@", error]);
     }
@@ -1858,6 +1990,7 @@ static int cmdWriteMarkdownFullReplace(id note, id viewContext, NSString *identi
 // Preserved for backward compatibility via --diff flag.
 static int cmdWriteMarkdownDiff(id note, id viewContext, NSString *identifier,
                                  NSArray *newModel, BOOL dryRun, BOOL backup) {
+    validateAttachmentReferences(note, newModel);
     NSArray *oldModel = noteToParaModel(note);
 
     // Filter out leading empty paragraphs from old model (canonical leading \n)
@@ -2133,6 +2266,7 @@ static int cmdWriteMarkdownDiff(id note, id viewContext, NSString *identifier,
                 }
 
                 patchedAttrs[@"TTStyle"] = patchedStyle;
+                [patchedAttrs removeObjectForKey:@"NSAttachment"];
                 [patchedAttrs removeObjectForKey:@"NSLink"];
                 [patchedAttrs removeObjectForKey:@"TTStrikethrough"];
                 [patchedAttrs removeObjectForKey:@"TTHints"];
@@ -2207,7 +2341,7 @@ static int cmdWriteMarkdownDiff(id note, id viewContext, NSString *identifier,
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("endEditing"));
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("saveNoteData"));
     NSError *error = nil;
-    [viewContext save:&error];
+    saveNotesContext(viewContext, &error);
     if (error) {
         errorExit([NSString stringWithFormat:@"Save error: %@", error]);
     }
@@ -2895,7 +3029,7 @@ static void syncCreateFolderInParent(id viewContext, NSString *name, id parentFo
     ((void (*)(id, SEL, id))objc_msgSend)(newFolder, sel_registerName("setTitle:"), name);
     if (parentFolder) ((void (*)(id, SEL, id))objc_msgSend)(newFolder, sel_registerName("setParent:"), parentFolder);
     NSError *error = nil;
-    [viewContext save:&error];
+    saveNotesContext(viewContext, &error);
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 }
 
@@ -2950,7 +3084,7 @@ static void syncApplyNoteDates(id viewContext, id note, NSDate *created, NSDate 
     @try { if (created) ((void (*)(id, SEL, id))objc_msgSend)(note, sel_registerName("setCreationDate:"), created); } @catch (NSException *e) {}
     @try { if (modified) ((void (*)(id, SEL, id))objc_msgSend)(note, sel_registerName("setModificationDate:"), modified); } @catch (NSException *e) {}
     NSError *error = nil;
-    [viewContext save:&error];
+    saveNotesContext(viewContext, &error);
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 }
 
@@ -3084,7 +3218,7 @@ static int cmdSync(id viewContext, NSString *dirArg, NSString *folderName, NSStr
                 ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("markForDeletion"));
                 [viewContext deleteObject:note];
                 NSError *deleteError = nil;
-                [viewContext save:&deleteError];
+                saveNotesContext(viewContext, &deleteError);
                 if (deleteError) errorExit([NSString stringWithFormat:@"Save error: %@", deleteError]);
             }
         } else if (fileExists && noteChanged && fileChanged && ![file[@"hash"] isEqualToString:noteHash]) {
@@ -3324,6 +3458,8 @@ static void usage(void) {
     fprintf(stderr, "      --title is a substring match by default. --exact requires exactly one exact title match.\n");
     fprintf(stderr, "  notekit search --query <query> [--folder <name>]\n");
     fprintf(stderr, "  notekit delete --id <id>\n");
+    fprintf(stderr, "  notekit insert-image --id <id> --file <png|jpeg> [--position <n>] [--body-offset]\n");
+    fprintf(stderr, "  notekit delete-attachment --id <id> --attachment <attachment-id>\n");
     fprintf(stderr, "  notekit move --id <id> --to <to-folder>\n");
     fprintf(stderr, "  notekit pin --id <id>\n");
     fprintf(stderr, "  notekit unpin --id <id>\n");

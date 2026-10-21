@@ -53,6 +53,74 @@ static void errorExit(NSString *msg) {
     exit(1);
 }
 
+// Notes.app does not enqueue existing-note uploads after a bare Core Data save.
+// Moving a note to its CURRENT folder through Notes' own scripting handler
+// performs its normal save bookkeeping without changing content or location.
+// Pass IDs as argv, never interpolate note text/names into AppleScript or a shell.
+static BOOL saveNotesContext(NSManagedObjectContext *viewContext, NSError **error) {
+    [viewContext processPendingChanges];
+    if (![viewContext hasChanges]) return YES;
+    NSMutableSet *notes = [NSMutableSet set];
+    NSMutableSet *changed = [NSMutableSet setWithSet:[viewContext updatedObjects]];
+    [changed unionSet:[viewContext insertedObjects]];
+    for (NSManagedObject *object in changed) {
+        if (object.isDeleted) continue;
+        if ([object isKindOfClass:ICNoteClass]) [notes addObject:object];
+        if ([object.entity.name isEqualToString:@"ICNoteData"]) {
+            id note = [object valueForKey:@"note"];
+            if (note && ![note isDeleted]) [notes addObject:note];
+        }
+    }
+    if (![viewContext save:error]) return NO;
+    if (notes.count == 0) return YES;
+    NSMutableArray *arguments = [NSMutableArray arrayWithArray:@[@"-e",
+        @"on run argv\n"
+         "tell application \"Notes\"\n"
+         "repeat with i from 1 to (count argv) by 2\n"
+         "move note id (item i of argv) to folder id (item (i + 1) of argv)\n"
+         "end repeat\n"
+         "end tell\n"
+         "end run", @"--"]];
+    for (NSManagedObject *note in notes) {
+        NSManagedObject *folder = [note valueForKey:@"folder"];
+        if (!folder) continue;
+        [arguments addObject:note.objectID.URIRepresentation.absoluteString];
+        [arguments addObject:folder.objectID.URIRepresentation.absoluteString];
+    }
+    if (arguments.count == 3) return YES;
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/osascript"];
+    task.arguments = arguments;
+    task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    // Capture diagnostics in a file: a pipe could fill while waiting for Notes.
+    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"notekit-save-%@", NSUUID.UUID.UUIDString]];
+    [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:@{NSFilePosixPermissions: @0600}];
+    NSFileHandle *diagnostics = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (!diagnostics) {
+        fprintf(stderr, "Warning: saved locally, but could not prepare Notes.app save notification.\n");
+        return YES;
+    }
+    task.standardError = diagnostics;
+    NSError *launchError = nil;
+    BOOL launched = [task launchAndReturnError:&launchError];
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:10];
+    while (launched && task.running && deadline.timeIntervalSinceNow > 0) [NSThread sleepForTimeInterval:0.01];
+    BOOL timedOut = launched && task.running;
+    if (timedOut) [task terminate];
+    [diagnostics closeFile];
+    NSString *detail = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    if (!launched || timedOut || task.terminationStatus != 0) {
+        fprintf(stderr, "Warning: saved locally, but Notes.app could not schedule iCloud upload: %s\n",
+            [(timedOut ? @"Notes.app did not respond within 10 seconds" : launchError.localizedDescription ?: detail ?: @"unknown error") UTF8String]);
+    }
+    // Notes.app may have updated the same records; discard committed snapshots
+    // before another edit in this process (create-markdown, sync, or --backup).
+    [viewContext refreshAllObjects];
+    return YES;
+}
+
 // Return Full Disk Access troubleshooting text (no preamble).
 // Testable: callers can inspect the string; printFDATroubleshootingSteps() prints it.
 static NSString *fdaTroubleshootingText(void) {
@@ -727,7 +795,7 @@ static int cmdCreateFolder(id viewContext, NSString *name, NSString *parentName)
     }
 
     NSError *error = nil;
-    [viewContext save:&error];
+    saveNotesContext(viewContext, &error);
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 
     NSString *path = folderPathForFolder(newFolder) ?: name;
@@ -752,7 +820,7 @@ static int cmdDeleteFolder(id viewContext, NSString *name) {
     [viewContext deleteObject:targetFolder];
 
     NSError *error = nil;
-    [viewContext save:&error];
+    saveNotesContext(viewContext, &error);
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 
     printJSON(@{@"name": name, @"deleted": @YES});
@@ -842,7 +910,7 @@ static int cmdDuplicate(id viewContext, NSString *identifier, NSString *newTitle
     ((void (*)(id, SEL))objc_msgSend)(newNote, sel_registerName("endEditing"));
     ((void (*)(id, SEL))objc_msgSend)(newNote, sel_registerName("saveNoteData"));
     NSError *error = nil;
-    [viewContext save:&error];
+    saveNotesContext(viewContext, &error);
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 
     printJSON(noteToDict(newNote));
@@ -1068,7 +1136,7 @@ static int cmdSetAttr(id viewContext, NSString *identifier,
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("endEditing"));
     ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("saveNoteData"));
     NSError *error = nil;
-    [viewContext save:&error];
+    saveNotesContext(viewContext, &error);
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 
     printJSON(@{@"id": identifier, @"offset": @(offset), @"length": @(length), @"updated": @YES, @"content": noteToMarkdownString(note)});
@@ -1089,7 +1157,7 @@ static int cmdMoveNote(id viewContext, NSString *identifier, NSString *toFolder)
 
     ((void (*)(id, SEL, id))objc_msgSend)(note, sel_registerName("setFolder:"), targetFolder);
     NSError *error = nil;
-    [viewContext save:&error];
+    saveNotesContext(viewContext, &error);
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 
     printJSON(@{@"id": identifier, @"movedTo": toFolder});
@@ -1123,7 +1191,7 @@ static int cmdPin(id viewContext, NSString *identifier, BOOL pin) {
 
     ((void (*)(id, SEL, BOOL))objc_msgSend)(note, sel_registerName("setIsPinned:"), pin);
     NSError *error = nil;
-    [viewContext save:&error];
+    saveNotesContext(viewContext, &error);
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 
     printJSON(@{@"id": identifier, @"pinned": @(pin)});
@@ -1215,7 +1283,7 @@ static int cmdAddLink(id viewContext, NSString *sourceId, NSString *targetId,
     ((void (*)(id, SEL))objc_msgSend)(sourceNote, sel_registerName("endEditing"));
     ((void (*)(id, SEL))objc_msgSend)(sourceNote, sel_registerName("saveNoteData"));
     NSError *error = nil;
-    [viewContext save:&error];
+    saveNotesContext(viewContext, &error);
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 
     printJSON(@{
@@ -1291,7 +1359,7 @@ static int cmdAddNoteLink(id viewContext, NSString *sourceId, NSString *targetId
     ((void (*)(id, SEL))objc_msgSend)(sourceNote, sel_registerName("endEditing"));
     ((void (*)(id, SEL))objc_msgSend)(sourceNote, sel_registerName("saveNoteData"));
     NSError *error = nil;
-    [viewContext save:&error];
+    saveNotesContext(viewContext, &error);
     if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
 
     NSString *displayText = ((id (*)(id, SEL))objc_msgSend)(attachment, sel_registerName("displayText"));

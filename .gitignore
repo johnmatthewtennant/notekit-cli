@@ -5,3 +5,6 @@ notes-inspect
 thoughts/
 *.local.*
 CLAUDE.local.md
+
+note-state
+__pycache__/

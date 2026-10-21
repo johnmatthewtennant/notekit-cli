@@ -3,6 +3,7 @@
 
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
+#import <ImageIO/ImageIO.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <CoreData/CoreData.h>
@@ -72,7 +73,7 @@ int main(int argc, const char *argv[]) {
             @"read-markdown", @"write-markdown", @"set-attr", @"move", @"search",
             @"pin", @"unpin", @"duplicate", @"create-folder", @"delete-folder",
             @"create-empty", @"create", @"create-markdown", @"delete", @"append", @"insert",
-            @"delete-range", @"search-offset", @"replace", @"delete-line",
+            @"delete-range", @"search-offset", @"replace", @"delete-line", @"insert-image", @"delete-attachment",
             @"get-link", @"add-link", @"add-note-link",
             @"export", @"import", @"sync", @"sync-daemon", @"sync-resolve-conflict", @"install-skill", @"version", @"test", nil];
         if (![knownCommands containsObject:command]) {
@@ -290,6 +291,18 @@ int main(int argc, const char *argv[]) {
             }
             return cmdInsert(viewContext, noteID, kwText, [opts[@"position"] integerValue],
                 [opts[@"body-offset"] isEqualToString:@"true"], styleVal);
+
+        } else if ([command isEqualToString:@"insert-image"]) {
+            if (![opts[@"id"] length] || ![opts[@"file"] length]) errorExit(@"insert-image requires --id and --file");
+            NSInteger position = -1;
+            if (opts[@"position"] && (!isStrictInteger(opts[@"position"], &position) || position < 0))
+                errorExit(@"--position must be a non-negative integer");
+            return cmdInsertImage(viewContext, opts[@"id"], opts[@"file"], position,
+                [opts[@"body-offset"] isEqualToString:@"true"]);
+
+        } else if ([command isEqualToString:@"delete-attachment"]) {
+            if (![opts[@"id"] length] || ![opts[@"attachment"] length]) errorExit(@"delete-attachment requires --id and --attachment");
+            return cmdDeleteAttachment(viewContext, opts[@"id"], opts[@"attachment"]);
 
         } else if ([command isEqualToString:@"delete-range"]) {
             NSString *noteID = opts[@"id"];

@@ -100,9 +100,19 @@ static void saveNote(id note, id viewContext, NSUInteger newLength, NSInteger de
 }
 
 
+// Leave Notes' native default untouched when no display preference was requested.
+static BOOL setImagePreferredViewSize(id attachment, NSString *view) {
+    if (!view) return YES;
+    SEL setter = sel_registerName("setPreferredViewSize:");
+    if (![attachment respondsToSelector:setter]) return NO;
+    ((void (*)(id, SEL, short))objc_msgSend)(attachment, setter,
+        [view isEqualToString:@"small"] ? (short)1 : (short)0);
+    return YES;
+}
+
 // Native media import keeps Notes responsible for media files and metadata.
 static int cmdInsertImage(id viewContext, NSString *identifier, NSString *file,
-                          NSInteger position, BOOL bodyRelative) {
+                          NSInteger position, BOOL bodyRelative, NSString *view) {
     id note = findNoteByID(viewContext, identifier);
     if (!note) errorExit(@"Note not found");
     SEL import = sel_registerName("addAttachmentWithFileURL:");
@@ -135,6 +145,10 @@ static int cmdInsertImage(id viewContext, NSString *identifier, NSString *file,
     if (!attachment || ![attachment valueForKey:@"media"]) {
         [viewContext rollback];
         errorExit(@"Notes failed to import the image");
+    }
+    if (!setImagePreferredViewSize(attachment, view)) {
+        [viewContext rollback];
+        errorExit(@"Image display size is unavailable on this macOS version");
     }
     NSString *attachmentID = [[[attachment valueForKey:@"identifier"] copy] autorelease];
     id tt = [[ICTTAttachmentClass alloc] init];
@@ -3481,7 +3495,7 @@ static void usage(void) {
     fprintf(stderr, "      --title is a substring match by default. --exact requires exactly one exact title match.\n");
     fprintf(stderr, "  notekit search --query <query> [--folder <name>]\n");
     fprintf(stderr, "  notekit delete --id <id>                     Move to Recently Deleted (recoverable)\n");
-    fprintf(stderr, "  notekit insert-image --id <id> --file <png|jpeg> [--position <n>] [--body-offset]\n");
+    fprintf(stderr, "  notekit insert-image --id <id> --file <png|jpeg> [--position <n>] [--body-offset] [--view small|large]\n");
     fprintf(stderr, "  notekit delete-attachment --id <id> --attachment <attachment-id>\n");
     fprintf(stderr, "  notekit move --id <id> --to <to-folder>\n");
     fprintf(stderr, "  notekit pin --id <id>\n");

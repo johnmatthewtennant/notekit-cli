@@ -38,6 +38,9 @@ int main(int argc, const char *argv[]) {
                 opts[@"help"] = @"true";
             } else if ([arg hasPrefix:@"--"]) {
                 NSString *flag = [arg substringFromIndex:2];
+                if ([flag isEqualToString:@"view"] &&
+                    (i + 1 >= argc || ![@[@"small", @"large"] containsObject:[NSString stringWithUTF8String:argv[i + 1]]]))
+                    errorExit(@"--view must be small or large");
                 if ([flag isEqualToString:@"help"] ||
                     [flag isEqualToString:@"claude"] ||
                     [flag isEqualToString:@"agents"] ||
@@ -298,7 +301,7 @@ int main(int argc, const char *argv[]) {
             if (opts[@"position"] && (!isStrictInteger(opts[@"position"], &position) || position < 0))
                 errorExit(@"--position must be a non-negative integer");
             return cmdInsertImage(viewContext, opts[@"id"], opts[@"file"], position,
-                [opts[@"body-offset"] isEqualToString:@"true"]);
+                [opts[@"body-offset"] isEqualToString:@"true"], opts[@"view"]);
 
         } else if ([command isEqualToString:@"delete-attachment"]) {
             if (![opts[@"id"] length] || ![opts[@"attachment"] length]) errorExit(@"delete-attachment requires --id and --attachment");

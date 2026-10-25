@@ -35,6 +35,7 @@ int main(int argc, char **argv) {
         for (id attachment in [note valueForKey:@"visibleAttachments"]) {
             NSMutableDictionary *entry = [NSMutableDictionary dictionary];
             entry[@"id"] = [attachment valueForKey:@"identifier"];
+            entry[@"preferredViewSize"] = @(((short (*)(id, SEL))objc_msgSend)(attachment, sel_registerName("preferredViewSize")));
             entry[@"uti"] = [attachment valueForKey:@"typeUTI"] ?: @"";
             NSRange range = ((NSRange (*)(id, SEL, id))objc_msgSend)(note, sel_registerName("rangeForAttachment:"), attachment);
             entry[@"position"] = @(range.location);

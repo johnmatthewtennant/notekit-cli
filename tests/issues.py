@@ -88,10 +88,33 @@ def main():
             image.write_bytes(png)
             result = command('insert-image', '--id', note, '--file', image, '--position', 0, '--body-offset')
             attachment = result['attachmentId']
+            assert state(note)['attachments'][0]['preferredViewSize'] == 0, 'default must remain Large'
             s = state(note)
             a = next(x for x in s['attachments'] if x['id'] == attachment)
             assert a['position'] == result['position'] and a['length'] == 1
             assert base64.b64decode(a['data']) == png, 'imported media changed'
+            # Preferences must persist across CLI processes and Markdown edits.
+            for view, expected in (('small', 1), ('large', 0)):
+                sized = command('insert-image', '--id', note, '--file', image, '--view', view)['attachmentId']
+                def check_size():
+                    item = next(a for a in state(note)['attachments'] if a['id'] == sized)
+                    assert item['preferredViewSize'] == expected, (view, item)
+                    assert base64.b64decode(item['data']) == png
+                check_size()
+                for diff in (True, False):
+                    markdown = command('read-markdown', '--id', note).replace('before', 'edited before')
+                    command('write-markdown', '--id', note, *(['--diff'] if diff else []), text=markdown)
+                    check_size()
+                wait_cloud(note)
+                check_size()
+                command('delete-attachment', '--id', note, '--attachment', sized)
+            before_invalid = state(note)
+            for arguments in (('--view', 'medium'), ('--view',), ('--view', '--body-offset')):
+                failed = command('insert-image', '--id', note, '--file', image, *arguments, ok=False)
+                assert failed.returncode and '--view' in failed.stderr, failed
+                after_invalid = state(note)
+                assert after_invalid['text'] == before_invalid['text']
+                assert [(a['id'], a['preferredViewSize'], a['data']) for a in after_invalid['attachments']] == [(a['id'], a['preferredViewSize'], a['data']) for a in before_invalid['attachments']]
             # Read through the actual Notes app as well as the private framework.
             script = 'on run argv\ntell application "Notes" to get body of first note of folder (item 1 of argv)\nend run'
             html = subprocess.run(['/usr/bin/osascript', '-e', script, '--', folder], capture_output=True, text=True, check=True).stdout

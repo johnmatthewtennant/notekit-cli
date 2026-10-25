@@ -99,13 +99,16 @@ covered by this note-deletion change.
 ## Image attachments
 
 ```bash
-notekit insert-image --id NOTE_ID --file schedule.png --position 0 --body-offset
+notekit insert-image --id NOTE_ID --file schedule.png --position 0 --body-offset --view small
 notekit insert-image --id NOTE_ID --file photo.jpeg
 notekit delete-attachment --id NOTE_ID --attachment ATTACHMENT_ID
 ```
 
 `insert-image` accepts PNG or JPEG files and returns JSON containing `id`,
-`attachmentId`, and `position`. Positions count UTF-16 code units in the full
+`attachmentId`, and `position`. Use `--view small` for an inline thumbnail or
+`--view large` for a full-size display, matching Notes.app’s View As menu.
+Omitting `--view` keeps Notes’ default Large size. This changes the display
+preference without resizing the original image file. Positions count UTF-16 code units in the full
 note, including its title. `--body-offset` makes an explicit position relative to
 the body. Omitting `--position` appends to the end. Password-protected notes are
 not supported by these attachment commands.

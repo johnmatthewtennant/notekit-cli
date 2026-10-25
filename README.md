@@ -81,6 +81,21 @@ Notes.app may launch in the background. Allow the launching app to control Notes
 if macOS requests Automation permission. If Notes cannot respond or Automation is
 denied, the local edit remains saved and Notekit prints a warning to stderr.
 
+## Recoverable deletion
+
+`notekit delete --id NOTE_ID` moves the note through Notes.app into the Recently
+Deleted folder belonging to that note's account. It retains the note for recovery
+in Notes.app and schedules normal iCloud synchronization. The destination is
+selected by folder type and account, so localized or duplicate folder names do
+not redirect the note. Normal list, search and ID lookups exclude Recently Deleted.
+
+Deleting requires Notes Automation permission. If Notes.app cannot perform the
+move, the command returns an error instead of deleting the local record or
+reporting success. Successful deletion confirms the local recoverable move;
+iCloud delivery is asynchronous. A second `delete` does not permanently erase a
+note already in Recently Deleted. `delete-folder` is a separate path and is not
+covered by this note-deletion change.
+
 ## Image attachments
 
 ```bash
@@ -164,3 +179,23 @@ preservation, input validation, and iCloud's recorded acknowledgement of local
 versions. Both issue suites require a working iCloud account and Notes Automation
 permission. Run them sequentially, separately from the existing suite's folder
 cleanup. The `note-state` helper reads test-note state without modifying it.
+
+Issue #63 has an isolated contract test that does not open the personal Notes
+store or send Apple events:
+
+```bash
+make deletion-tests
+./deletion-tests
+```
+
+CI runs the same contract against v0.5.88 and the fix. The live deletion check
+creates one uniquely named note in an existing folder, verifies recovery and
+cloud acknowledgement, and leaves it in Recently Deleted:
+
+```bash
+make notekit note-state
+python3 tests/delete.py --folder Notes
+```
+
+The live test refuses known hard-delete versions unless explicitly enabled with
+`--allow-hard-delete`; reproducing that old behavior can require cloud recovery.

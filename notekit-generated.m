@@ -53,6 +53,46 @@ static void errorExit(NSString *msg) {
     exit(1);
 }
 
+// Run Notes scripts without a shell. Deletion must report failure, whereas a
+// post-save upload notification can warn after a successful local edit.
+static BOOL runNotesScript(NSString *script, NSArray *parameters,
+                            NSTimeInterval timeout, NSError **error) {
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/osascript"];
+    NSMutableArray *arguments = [NSMutableArray arrayWithArray:@[@"-e", script, @"--"]];
+    [arguments addObjectsFromArray:parameters];
+    task.arguments = arguments;
+    task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"notekit-script-%@", NSUUID.UUID.UUIDString]];
+    [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:@{NSFilePosixPermissions: @0600}];
+    NSFileHandle *diagnostics = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (!diagnostics) {
+        if (error) *error = [NSError errorWithDomain:@"notekit" code:1 userInfo:
+            @{NSLocalizedDescriptionKey: @"Could not prepare Notes.app command diagnostics"}];
+        return NO;
+    }
+    task.standardError = diagnostics;
+    NSError *launchError = nil;
+    BOOL launched = [task launchAndReturnError:&launchError];
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+    while (launched && task.running && deadline.timeIntervalSinceNow > 0)
+        [NSThread sleepForTimeInterval:0.01];
+    BOOL timedOut = launched && task.running;
+    if (timedOut) [task terminate];
+    [diagnostics closeFile];
+    NSString *detail = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    if (!launched || timedOut || task.terminationStatus != 0) {
+        NSString *message = timedOut ? @"Notes.app did not respond before the command timeout" :
+            launchError.localizedDescription ?: ([detail length] ? detail : @"Notes.app command failed");
+        if (error) *error = [NSError errorWithDomain:@"notekit" code:2
+            userInfo:@{NSLocalizedDescriptionKey: message}];
+        return NO;
+    }
+    return YES;
+}
+
 // Notes.app does not enqueue existing-note uploads after a bare Core Data save.
 // Moving a note to its CURRENT folder through Notes' own scripting handler
 // performs its normal save bookkeeping without changing content or location.
@@ -73,47 +113,23 @@ static BOOL saveNotesContext(NSManagedObjectContext *viewContext, NSError **erro
     }
     if (![viewContext save:error]) return NO;
     if (notes.count == 0) return YES;
-    NSMutableArray *arguments = [NSMutableArray arrayWithArray:@[@"-e",
-        @"on run argv\n"
-         "tell application \"Notes\"\n"
-         "repeat with i from 1 to (count argv) by 2\n"
-         "move note id (item i of argv) to folder id (item (i + 1) of argv)\n"
-         "end repeat\n"
-         "end tell\n"
-         "end run", @"--"]];
+    NSMutableArray *parameters = [NSMutableArray array];
     for (NSManagedObject *note in notes) {
         NSManagedObject *folder = [note valueForKey:@"folder"];
         if (!folder) continue;
-        [arguments addObject:note.objectID.URIRepresentation.absoluteString];
-        [arguments addObject:folder.objectID.URIRepresentation.absoluteString];
+        [parameters addObject:note.objectID.URIRepresentation.absoluteString];
+        [parameters addObject:folder.objectID.URIRepresentation.absoluteString];
     }
-    if (arguments.count == 3) return YES;
-    NSTask *task = [[NSTask alloc] init];
-    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/osascript"];
-    task.arguments = arguments;
-    task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
-    // Capture diagnostics in a file: a pipe could fill while waiting for Notes.
-    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
-        [NSString stringWithFormat:@"notekit-save-%@", NSUUID.UUID.UUIDString]];
-    [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:@{NSFilePosixPermissions: @0600}];
-    NSFileHandle *diagnostics = [NSFileHandle fileHandleForWritingAtPath:path];
-    if (!diagnostics) {
-        fprintf(stderr, "Warning: saved locally, but could not prepare Notes.app save notification.\n");
-        return YES;
-    }
-    task.standardError = diagnostics;
-    NSError *launchError = nil;
-    BOOL launched = [task launchAndReturnError:&launchError];
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:10];
-    while (launched && task.running && deadline.timeIntervalSinceNow > 0) [NSThread sleepForTimeInterval:0.01];
-    BOOL timedOut = launched && task.running;
-    if (timedOut) [task terminate];
-    [diagnostics closeFile];
-    NSString *detail = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
-    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
-    if (!launched || timedOut || task.terminationStatus != 0) {
+    if (parameters.count == 0) return YES;
+    NSString *script = @"on run argv\n"
+        "tell application \"Notes\"\n"
+        "repeat with i from 1 to (count argv) by 2\n"
+        "move note id (item i of argv) to folder id (item (i + 1) of argv)\n"
+        "end repeat\nend tell\nend run";
+    NSError *scriptError = nil;
+    if (!runNotesScript(script, parameters, 10, &scriptError)) {
         fprintf(stderr, "Warning: saved locally, but Notes.app could not schedule iCloud upload: %s\n",
-            [(timedOut ? @"Notes.app did not respond within 10 seconds" : launchError.localizedDescription ?: detail ?: @"unknown error") UTF8String]);
+            scriptError.localizedDescription.UTF8String);
     }
     // Notes.app may have updated the same records; discard committed snapshots
     // before another edit in this process (create-markdown, sync, or --backup).
@@ -330,7 +346,28 @@ static NSPredicate *activeFolderPredicate(void) {
 }
 
 static NSPredicate *activeNotePredicate(void) {
-    return [NSPredicate predicateWithFormat:@"markedForDeletion == NO AND folder.markedForDeletion == NO"];
+    return [NSPredicate predicateWithFormat:@"markedForDeletion == NO AND folder.markedForDeletion == NO AND folder.folderType != 1"];
+}
+
+// folderType=1 is Recently Deleted. Titles are localized and accounts may each
+// have their own folder; never fall back to another account's destination.
+static id recentlyDeletedFolderForAccount(NSManagedObjectContext *context, id account, NSError **error) {
+    if (!account) {
+        if (error) *error = [NSError errorWithDomain:@"notekit" code:3 userInfo:
+            @{NSLocalizedDescriptionKey: @"Cannot determine the note's account"}];
+        return nil;
+    }
+    NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICFolder"];
+    request.predicate = [NSPredicate predicateWithFormat:
+        @"account == %@ AND folderType == 1 AND markedForDeletion == NO", account];
+    NSArray *folders = [context executeFetchRequest:request error:error];
+    if (!folders) return nil;
+    if (folders.count != 1) {
+        if (error) *error = [NSError errorWithDomain:@"notekit" code:4 userInfo:
+            @{NSLocalizedDescriptionKey: @"Expected exactly one Recently Deleted folder in the note's account. Open Notes.app and try again."}];
+        return nil;
+    }
+    return folders.firstObject;
 }
 
 static NSArray *fetchFolders(id viewContext) {

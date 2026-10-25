@@ -24,10 +24,13 @@ install-hooks:
 	git config core.hooksPath .githooks
 
 clean:
-	rm -f notekit notes-inspect note-state
+	rm -f notekit notes-inspect note-state deletion-tests
 
 .PHONY: all clean generate install-hooks
 
 note-state: tests/note-state.m notekit.m notekit-generated.m notekit-handwritten.m notekit-tests.m notekit-version-check.m disclaim.c disclaim.h $(INFO_PLIST)
 	$(CC) $(CFLAGS) $(INFO_PLIST_FLAGS) tests/note-state.m disclaim.c -o $@
 	codesign --force --sign - --identifier $(BUNDLE_ID) $@
+
+deletion-tests: tests/deletion-tests.m notekit.m notekit-generated.m notekit-handwritten.m notekit-tests.m notekit-version-check.m disclaim.c disclaim.h $(INFO_PLIST)
+	$(CC) $(CFLAGS) tests/deletion-tests.m disclaim.c -o $@

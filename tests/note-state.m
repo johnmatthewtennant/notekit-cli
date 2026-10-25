@@ -7,9 +7,23 @@ int main(int argc, char **argv) {
         if (argc != 2) return 2;
         loadFramework();
         id context = getViewContext();
-        id note = findNoteByID(context, [NSString stringWithUTF8String:argv[1]]);
-        if (!note) return 3;
+        // Observe recoverable notes too: production lookups exclude Recently Deleted.
+        NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"ICNote"];
+        request.predicate = [NSPredicate predicateWithFormat:@"identifier == %@", [NSString stringWithUTF8String:argv[1]]];
+        NSError *fetchError = nil;
+        NSArray *matches = [context executeFetchRequest:request error:&fetchError];
+        if (fetchError) errorExit(fetchError.localizedDescription);
+        id note = matches.firstObject;
+        if (!note) { printJSON(@{@"exists": @NO}); return 0; }
         NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        id folder = [note valueForKey:@"folder"];
+        id account = [folder valueForKey:@"account"];
+        result[@"exists"] = @YES;
+        result[@"noteURI"] = [[note objectID] URIRepresentation].absoluteString;
+        result[@"folderType"] = [folder valueForKey:@"folderType"] ?: @(-1);
+        result[@"folderURI"] = [[folder objectID] URIRepresentation].absoluteString ?: @"";
+        result[@"accountURI"] = [[account objectID] URIRepresentation].absoluteString ?: @"";
+        result[@"markedForDeletion"] = [note valueForKey:@"markedForDeletion"] ?: @NO;
         result[@"pinned"] = [note valueForKey:@"isPinned"];
         result[@"modified"] = dateToISO([note valueForKey:@"modificationDate"]);
         result[@"text"] = [((NSAttributedString *)[note valueForKey:@"attributedString"]) string];

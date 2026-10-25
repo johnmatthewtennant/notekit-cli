@@ -28,7 +28,7 @@ jobs:
           grep -q 'FAIL: delete hard-deleted the row' /tmp/notekit-delete-red.log
       - name: Verify the fix and compile the CLI
         run: |
-          make notekit deletion-tests
+          make notekit note-state deletion-tests
           ./deletion-tests
       - name: Check generator output
         run: |

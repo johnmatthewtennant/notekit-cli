@@ -1,0 +1,33 @@
+name: Image display size
+on:
+  pull_request:
+jobs:
+  image-view:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile CLI and live observer
+        run: make notekit note-state
+      - name: Test display preference contract without personal Notes data
+        run: |
+          clang -framework Foundation -framework CoreData -framework AppKit -framework ImageIO -lobjc tests/image-view-tests.m disclaim.c -o /tmp/image-view-tests
+          /tmp/image-view-tests
+      - name: Reject invalid or missing display options before loading Notes
+        shell: bash
+        run: |
+          for value in medium ''; do
+            if ./notekit insert-image --view "$value" --help > /tmp/view.log 2>&1; then
+              echo 'Expected invalid --view to fail'; exit 1
+            fi
+            grep -q -- '--view must be small or large' /tmp/view.log
+          done
+          if ./notekit insert-image --view > /tmp/view.log 2>&1; then exit 1; fi
+          grep -q -- '--view must be small or large' /tmp/view.log
+          ./notekit insert-image --view small --help
+          ./notekit insert-image --view large --help
+      - name: Check generator output
+        run: |
+          python3 generate-notes-cli.py > /tmp/notekit-generated.m
+          diff -u notekit-generated.m /tmp/notekit-generated.m

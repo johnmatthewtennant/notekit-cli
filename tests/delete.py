@@ -55,17 +55,20 @@ def main():
     note = call('create', '--folder', args.folder, '--title', title, '--body', 'Recoverable deletion regression')['id']
     print(f'Fixture: {note} ({title})', flush=True)
     before = wait_for(note, acknowledged, 'initial note did not reach iCloud')
+    print(f'Initial cloud version: {before["localVersion"]}/{before["syncedVersion"]}', flush=True)
     result = call('delete', '--id', note)
     assert result['id'] == note and result['deleted'] is True
     after = observe(note)
     assert after.get('exists'), 'delete hard-deleted the row instead of preserving a recoverable note'
     after = wait_for(note, lambda s: s.get('exists') and s['folderType'] == 1, 'note did not enter Recently Deleted')
+    assert after['localVersion'] > before['localVersion'], 'deletion did not advance the cloud version'
     assert after['accountURI'] == before['accountURI'], 'deletion crossed accounts'
     assert after['text'] == before['text'], 'deletion changed note content'
     assert not call('get', '--id', note, check=False).returncode == 0, 'normal lookup still exposes a deleted note'
     assert call('delete', '--id', note, check=False).returncode != 0, 'a second delete must not permanently remove the note'
     after = wait_for(note, acknowledged, 'recoverable deletion did not reach iCloud')
     assert after['folderType'] == 1
+    print(f'Deleted cloud version: {after["localVersion"]}/{after["syncedVersion"]}', flush=True)
     print('PASS: recoverable note retained, account/content preserved, normal lookups exclude it, iCloud acknowledged', flush=True)
 
 

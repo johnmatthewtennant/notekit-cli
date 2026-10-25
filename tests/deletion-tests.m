@@ -15,6 +15,7 @@ static NSManagedObjectContext *testContext;
 static NSManagedObject *testNote;
 static NSManagedObject *testTrash;
 static BOOL appCalled, appArgumentsValid;
+static NSManagedObjectID *expectedTrashID;
 
 // Simulate only the Notes.app boundary. Core Data persistence and the production
 // cmdDelete implementation are real. Reject a wrong/localized/default-account
@@ -29,8 +30,20 @@ static BOOL fakeLaunch(NSTask *task, SEL selector, NSError **error) {
         if (error) *error = [NSError errorWithDomain:@"test" code:1 userInfo:nil];
         return NO;
     }
-    [testNote setValue:testTrash forKey:@"folder"];
-    return [testContext save:error];
+    // Notes' save and the cross-process Core Data notification can arrive on
+    // the main queue after the Apple event reply. The CLI must keep that queue
+    // running while confirming deletion instead of blocking it with sleeps.
+    NSManagedObjectID *noteID = testNote.objectID;
+    NSManagedObjectID *trashID = testTrash.objectID;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSManagedObjectContext *appContext = [[NSManagedObjectContext alloc] initWithConcurrencyType:NSMainQueueConcurrencyType];
+        appContext.persistentStoreCoordinator = testContext.persistentStoreCoordinator;
+        id appNote = [appContext existingObjectWithID:noteID error:nil];
+        id appTrash = [appContext existingObjectWithID:trashID error:nil];
+        [appNote setValue:appTrash forKey:@"folder"];
+        [appContext save:nil];
+    });
+    return YES;
 }
 static BOOL fakeRunning(id task, SEL selector) { return NO; }
 static int fakeTerminationStatus(id task, SEL selector) { return 0; }
@@ -80,6 +93,7 @@ int main(void) {
         testNote = [NSEntityDescription insertNewObjectForEntityForName:@"ICNote" inManagedObjectContext:testContext];
         [testNote setValuesForKeysWithDictionary:@{@"identifier": @"fixture", @"body": @"preserve me", @"markedForDeletion": @NO, @"folder": source}];
         if (![testContext save:&error]) { fprintf(stderr, "%s\n", error.description.UTF8String); return 2; }
+        expectedTrashID = testTrash.objectID;
         ICNoteClass = [DeletionTestNote class];
         Class taskClass = [[[NSTask alloc] init] class];
         Method launch = class_getInstanceMethod(taskClass, @selector(launchAndReturnError:));
@@ -99,7 +113,7 @@ int main(void) {
         }
         NSManagedObject *n = retained.firstObject;
         if (rc || !appCalled || !appArgumentsValid ||
-            ![[n valueForKey:@"folder"] isEqual:testTrash] ||
+            ![[[n valueForKey:@"folder"] objectID] isEqual:expectedTrashID] ||
             ![[n valueForKey:@"body"] isEqual:@"preserve me"]) {
             fprintf(stderr, "FAIL: delete must move unchanged content to its own account's localized trash through Notes.app\n"); return 1;
         }

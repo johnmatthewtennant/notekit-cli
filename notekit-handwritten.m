@@ -66,13 +66,21 @@ static int cmdDelete(id viewContext, NSString *identifier) {
     if (!runNotesScript(script, @[noteURI, trashURI], 30, &error)) {
         errorExit([NSString stringWithFormat:@"Could not move note to Recently Deleted: %@", error.localizedDescription]);
     }
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5];
+    NSManagedObjectID *noteObjectID = [note objectID];
+    NSManagedObjectID *trashObjectID = [trash objectID];
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:15];
     BOOL moved = NO;
     do {
-        [viewContext refreshAllObjects];
-        id currentFolder = [note valueForKey:@"folder"];
-        moved = [[currentFolder objectID] isEqual:[trash objectID]];
-        if (!moved) [NSThread sleepForTimeInterval:0.05];
+        // Notes.app wrote through a different process. Drop this read-only
+        // command's registered snapshots and any pinned query generation.
+        [viewContext setQueryGenerationFromToken:nil error:nil];
+        [viewContext reset];
+        id currentNote = [viewContext existingObjectWithID:noteObjectID error:nil];
+        id currentFolder = [currentNote valueForKey:@"folder"];
+        moved = [[currentFolder objectID] isEqual:trashObjectID];
+        // Core Data's cross-process updater delivers changes on the main
+        // queue. Blocking that queue here leaves the pre-move snapshot stale.
+        if (!moved) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
     } while (!moved && deadline.timeIntervalSinceNow > 0);
     if (!moved) errorExit(@"Notes.app did not confirm the move to Recently Deleted; check the note before retrying");
     printJSON(@{@"id": identifier, @"deleted": @YES});

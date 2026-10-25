@@ -1,0 +1,36 @@
+name: Deletion regression
+on:
+  pull_request:
+jobs:
+  deletion:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reproduce the defect on v0.5.88
+        shell: bash
+        run: |
+          mkdir -p /tmp/notekit-delete-baseline
+          git archive v0.5.88 | tar -x -C /tmp/notekit-delete-baseline
+          mkdir -p /tmp/notekit-delete-baseline/tests
+          cp tests/deletion-tests.m /tmp/notekit-delete-baseline/tests/
+          cd /tmp/notekit-delete-baseline
+          clang -framework Foundation -framework CoreData -framework AppKit -framework ImageIO -lobjc tests/deletion-tests.m disclaim.c -o deletion-tests
+          if ./deletion-tests > /tmp/notekit-delete-red.log 2>&1; then
+            cat /tmp/notekit-delete-red.log
+            echo 'Expected the v0.5.88 deletion regression to fail'
+            exit 1
+          fi
+          cat /tmp/notekit-delete-red.log
+          grep -q 'FAIL: delete hard-deleted the row' /tmp/notekit-delete-red.log
+      - name: Verify the fix and compile the CLI
+        run: |
+          make notekit note-state deletion-tests
+          ./deletion-tests
+      - name: Check generator output
+        run: |
+          python3 generate-notes-cli.py > /tmp/notekit-generated.m
+          diff -u notekit-generated.m /tmp/notekit-generated.m

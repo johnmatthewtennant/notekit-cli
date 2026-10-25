@@ -52,14 +52,37 @@ static int cmdCreateEmpty(id viewContext, NSString *folderName) {
 static int cmdDelete(id viewContext, NSString *identifier) {
     id note = findNoteByID(viewContext, identifier);
     if (!note) errorExit([NSString stringWithFormat:@"Note not found with id: %@", identifier]);
-
-    ((void (*)(id, SEL))objc_msgSend)(note, sel_registerName("markForDeletion"));
-    [viewContext deleteObject:note];
-
+    id account = [[note valueForKey:@"folder"] valueForKey:@"account"];
     NSError *error = nil;
-    saveNotesContext(viewContext, &error);
-    if (error) errorExit([NSString stringWithFormat:@"Save error: %@", error]);
-
+    id trash = recentlyDeletedFolderForAccount(viewContext, account, &error);
+    if (!trash) errorExit(error.localizedDescription);
+    NSString *noteURI = [[note objectID] URIRepresentation].absoluteString;
+    NSString *trashURI = [[trash objectID] URIRepresentation].absoluteString;
+    NSString *script = @"on run argv\n"
+        "tell application \"Notes\" to move note id (item 1 of argv) to folder id (item 2 of argv)\n"
+        "end run";
+    // No markForDeletion/deleteObject/save before this handoff: if Automation
+    // fails, preserve the note and return an error instead of claiming success.
+    if (!runNotesScript(script, @[noteURI, trashURI], 30, &error)) {
+        errorExit([NSString stringWithFormat:@"Could not move note to Recently Deleted: %@", error.localizedDescription]);
+    }
+    NSManagedObjectID *noteObjectID = [note objectID];
+    NSManagedObjectID *trashObjectID = [trash objectID];
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:15];
+    BOOL moved = NO;
+    do {
+        // Notes.app wrote through a different process. Drop this read-only
+        // command's registered snapshots and any pinned query generation.
+        [viewContext setQueryGenerationFromToken:nil error:nil];
+        [viewContext reset];
+        id currentNote = [viewContext existingObjectWithID:noteObjectID error:nil];
+        id currentFolder = [currentNote valueForKey:@"folder"];
+        moved = [[currentFolder objectID] isEqual:trashObjectID];
+        // Core Data's cross-process updater delivers changes on the main
+        // queue. Blocking that queue here leaves the pre-move snapshot stale.
+        if (!moved) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    } while (!moved && deadline.timeIntervalSinceNow > 0);
+    if (!moved) errorExit(@"Notes.app did not confirm the move to Recently Deleted; check the note before retrying");
     printJSON(@{@"id": identifier, @"deleted": @YES});
     return 0;
 }
@@ -3457,7 +3480,7 @@ static void usage(void) {
     fprintf(stderr, "  notekit get (--title <title> | --id <id>) [--folder <name>] [--exact]\n");
     fprintf(stderr, "      --title is a substring match by default. --exact requires exactly one exact title match.\n");
     fprintf(stderr, "  notekit search --query <query> [--folder <name>]\n");
-    fprintf(stderr, "  notekit delete --id <id>\n");
+    fprintf(stderr, "  notekit delete --id <id>                     Move to Recently Deleted (recoverable)\n");
     fprintf(stderr, "  notekit insert-image --id <id> --file <png|jpeg> [--position <n>] [--body-offset]\n");
     fprintf(stderr, "  notekit delete-attachment --id <id> --attachment <attachment-id>\n");
     fprintf(stderr, "  notekit move --id <id> --to <to-folder>\n");
